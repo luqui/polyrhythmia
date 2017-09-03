@@ -10,8 +10,37 @@
         var M = PolyrhythmiaModule(jQuery);
         var game = new M.Game(3, new $$.Bounds(0, 0, 640, 480));
         
-        var ctx = $('#canvas')[0].getContext('2d');
-        game.draw(ctx);
+
+        var redraw = function() {
+            var ctx = $('#canvas')[0].getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            game.draw(ctx);
+        };
+
+        $(document).keydown(function(e) {
+            console.log(e.which);
+            switch (e.which) {
+                case 32: // space
+                    game.insert();
+                    redraw();
+                    break;
+                case 37: // left
+                    break;
+                case 38: // up
+                    game.prevTrack();
+                    redraw();
+                    break;
+                case 39: // right
+                    break;
+                case 40: // down
+                    game.nextTrack();
+                    redraw();
+                    break;
+            }
+            e.preventDefault();
+        });
+
+        redraw();
     });
   </script>
  </head>

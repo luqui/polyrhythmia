@@ -148,6 +148,14 @@ $$.Game.prototype.insert = function() {
     }
 };
 
+$$.Game.prototype.prevTrack = function() {
+    if (this.pieceRow > 0) { this.pieceRow--; }
+};
+
+$$.Game.prototype.nextTrack = function() {
+    if (this.pieceRow < this.sequence.tracks.length-1) { this.pieceRow++; }
+};
+
 return $$;
 
 };
