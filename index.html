@@ -10,7 +10,7 @@
     jQuery(function() {
         var M = PolyrhythmiaModule(jQuery);
         var MIDI = MidiModule();
-        var game = new M.Game(3, new M.Bounds(0, 0, 1200, 480));
+        var game = new M.Game(3, new M.Bounds(0, 0, 1200, 240));
 
         var midi = null;
 
@@ -42,13 +42,17 @@
             setTimeout(step, 30);
         };
 
+        var countdown = 10;
+
         $(document).keydown(function(e) {
             var handled = true;
             switch (e.which) {
                 case 32: // space
                     game.insert();
                     redraw();
-                    gameLoop();
+                    if (--countdown < 0) {
+                        gameLoop();
+                    }
                     break;
                 case 37: // left
                     game.prevItem();
@@ -79,6 +83,6 @@
   </script>
  </head>
  <body>
-    <canvas id="canvas" width="1200" height="480" style="border: 1px solid black"></canvas>
+    <canvas id="canvas" width="1200" height="240" style="border: 1px solid black"></canvas>
  </body>
 </html>

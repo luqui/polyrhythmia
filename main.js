@@ -1,5 +1,7 @@
 var PolyrhythmiaModule = function(jQuery) {
 
+var XSCALE = 30;
+
 var $$ = {};
 
 var gcd = function(a,b) {
@@ -50,23 +52,23 @@ $$.Bounds.prototype.sliceX = function(percent) {
 
 // Only axis-aligned transformations are allowed, because we're drawing
 // rectangles.
-$$.Grid = function(x0, y0, x1, y1) {
-    this.x0 = x0;
+$$.Grid = function(y0, y1, x0, xscale) {
     this.y0 = y0;
-    this.x1 = x1;
     this.y1 = y1;
+    this.x0 = x0;
+    this.xscale = xscale;
 };
 
 $$.Grid.prototype.locateX = function(x) {
-    return((this.x1-this.x0)*x + this.x0);
+    return this.xscale*x + this.x0;
 };
 
 $$.Grid.prototype.locateY = function(y) {
-    return((this.y1-this.y0)*y + this.y0);
+    return ((this.y1-this.y0)*y + this.y0);
 };
 
 $$.Grid.prototype.restrictY = function(start, height) {
-    return new $$.Grid(this.x0, this.y0 + (this.y1-this.y0)*start, this.x1, this.y0 + (this.y1-this.y0)*(start + height));
+    return new $$.Grid(this.y0 + (this.y1-this.y0)*start, this.y0 + (this.y1-this.y0)*(start + height), this.x0, this.xscale);
 };
 
 
@@ -105,6 +107,13 @@ $$.Rhythm.prototype.draw = function(ctx, grid, xbase) {
     ctx.fillStyle = '#000000';
     ctx.font = '18px serif';
     ctx.fillText(this.subdiv.scale(this.pattern.length).show(), x0, y0+24);
+    
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x0, y1);
+    ctx.stroke();
 };
 
 $$.Rhythm.prototype.play = function(midi, t0, dt) {
@@ -209,7 +218,7 @@ $$.Stack.prototype.play = function(midi, t0, dt) {
 $$.Sequence = function(numtracks, bounds) {
     this._tracks = [];
     this._bounds = bounds;
-    this._grid = new $$.Grid(bounds.x0, bounds.y0, 10, bounds.y1);
+    this._grid = new $$.Grid(bounds.y0, bounds.y1, bounds.x0, XSCALE);
     for (var i = 0; i < numtracks; i++) {
         this._tracks.push(new $$.Stack());
     }
@@ -281,7 +290,7 @@ $$.Game.prototype.draw = function(ctx) {
     for (var i = 0; i < this.palettes.length; i++) {
         let ybounds = this.sequence.rowYBounds(i);
         this.palettes[i].draw(ctx, 
-            new $$.Grid(this.paletteBounds.x0, ybounds[0], this.paletteBounds.x0+10, ybounds[1]));
+            new $$.Grid(ybounds[0], ybounds[1], this.paletteBounds.x0, XSCALE));
         if (this.activeRow == i) {
             ctx.strokeStyle = '#00ff00';
             ctx.lineWidth = 5;
@@ -290,11 +299,15 @@ $$.Game.prototype.draw = function(ctx) {
     }
 };
 
+var choose = function(list) {
+    return list[Math.floor(Math.random()*list.length)];
+};
+
 $$.Game.prototype.genRhythm = function() {
-    var channel = Math.floor(Math.random()*4);
+    var channel = 1; //Math.floor(Math.random()*4);
     var note = Math.floor(Math.random()*(83-36))+36;
 
-    var len = [4,5,6,8,10,12][Math.floor(Math.random()*6)];
+    var len = choose([4,5,6,8,10,12]);
     var vels = [];
     for (var i = 0; i < len; i++) {
         if (Math.random() < 0.5) {
@@ -305,7 +318,12 @@ $$.Game.prototype.genRhythm = function() {
         }
     }
 
-    return new $$.Rhythm(new $$.Rational(1,2), channel, note, vels);
+    var subdiv = choose([
+        new $$.Rational(1,2),
+        new $$.Rational(1,3),
+        new $$.Rational(1,4), 
+        new $$.Rational(1,6)]);
+    return new $$.Rhythm(subdiv, channel, note, vels);
 };
 
 $$.Game.prototype.insert = function() {
