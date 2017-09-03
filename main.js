@@ -87,8 +87,8 @@ $$.Rhythm.prototype.play = function(midi, t0, dt) {
     var ix0 = Math.floor(t0/div)+1;
     var ix1 = Math.floor((t0+dt)/div);
     while (ix0 <= ix1 && ix0 < this.pattern.length) {
-        console.log("note on ", ix0);
         midi.noteOn(this.channel, this.note, this.pattern[ix0]);
+        midi.noteOn(this.channel, this.note, 0);
         ix0++;
     }
 };
@@ -116,6 +116,9 @@ $$.Palette.prototype.draw = function(ctx, grid) {
             ctx.lineWidth = 3;
             ctx.strokeRect(grid.locateX(x), grid.locateY(0), grid.locateX(x+size)-grid.locateX(x), grid.locateY(1)-grid.locateY(0));
         }
+        ctx.fillStyle = '#000000';
+        ctx.font = '24px serif';
+        ctx.fillText(this._rhythms[i].count, grid.locateX(x)+12, grid.locateY(1)-12);
         x += size + 1;
     }
 };
@@ -132,8 +135,9 @@ $$.Palette.prototype.prevItem = function() {
     }
 };
 
-$$.Palette.prototype.current = function() {
-    if (this._rhythms) {
+$$.Palette.prototype.takeCurrent = function() {
+    if (this._rhythms && this._rhythms[this._selected].count > 0) {
+        this._rhythms[this._selected].count--;
         return this._rhythms[this._selected].rhythm;
     }
     else {
@@ -229,8 +233,8 @@ $$.Game = function(numtracks, bounds) {
     this.palettes = [];
     for (var i = 0; i < numtracks; i++) {
         let pal = new $$.Palette();
-        pal.add(this.genRhythm());
-        pal.add(this.genRhythm());
+        pal.add(this.genRhythm(), 4);
+        pal.add(this.genRhythm(), 4);
         this.palettes.push(pal);
     }
 
@@ -266,7 +270,7 @@ $$.Game.prototype.genRhythm = function() {
 };
 
 $$.Game.prototype.insert = function() {
-    var rhythm = this.palettes[this.activeRow].current();
+    var rhythm = this.palettes[this.activeRow].takeCurrent();
     if (rhythm) {
         this.sequence.insert(this.activeRow, rhythm);
     }
