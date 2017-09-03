@@ -26,15 +26,19 @@ $$.Rational.prototype.asNumber = function() {
 
 // Only axis-aligned transformations are allowed, because we're drawing
 // rectangles.
-$$.Grid = function() {
+$$.Grid = function(x0, y0, x1, y1) {
+    this.x0 = x0;
+    this.y0 = y0;
+    this.x1 = x1;
+    this.y1 = y1;
 };
 
 $$.Grid.prototype.locateX = function(x) {
-    return 10*x;
+    return((this.x1-this.x0)*x + this.x0);
 };
 
 $$.Grid.prototype.locateY = function(y) {
-    return 100*y;
+    return((this.y1-this.y0)*y + this.y0);
 };
 
 
@@ -48,6 +52,10 @@ $$.Stack.prototype.draw = function(ctx, grid) {
         this.symbols[i].draw(ctx, grid, accum);
         accum += this.symbols[i].size();
     }
+};
+
+$$.Stack.prototype.push = function(symbol) {
+    this.symbols.push(symbol);
 };
 
 
@@ -66,9 +74,31 @@ $$.Rhythm.prototype.draw = function(ctx, grid, xbase) {
     var x1 = grid.locateX(xbase + this.size());
     var y0 = grid.locateY(0);
     var y1 = grid.locateY(1);
-    console.log(x0, y0, x1-x0, y1-y0);
+    console.log(x0, y0, x1, y1);
     ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
 };
+
+
+$$.Sequence = function(numtracks) {
+    this.tracks = [];
+    for (var i = 0; i < numtracks; i++) {
+        this.tracks.push(new $$.Stack());
+    }
+};
+
+$$.Sequence.prototype.draw = function(ctx, bounds) {
+    for (var i = 0; i < this.tracks.length; i++) {
+        let dy = (bounds.y1 - bounds.y0)/this.tracks.length;
+        this.tracks[i].draw(
+            ctx, 
+            new $$.Grid(bounds.x0, 
+                        bounds.y0 + i*dy,
+                        bounds.x1 / 100,
+                        bounds.y0 + (i+1)*dy));
+
+    }
+};
+
 
 return $$;
 

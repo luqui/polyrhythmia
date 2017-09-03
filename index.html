@@ -8,15 +8,17 @@
   <script>
     jQuery(function() {
         var M = PolyrhythmiaModule(jQuery);
-        var stack = new M.Stack();
-        stack.symbols.push(new M.Rhythm(new M.Rational(1,1), 10), new M.Rhythm(new M.Rational(1,1), 20));
+        var seq = new M.Sequence(3);
+        seq.tracks[0].push(new M.Rhythm(new M.Rational(1,1), 10));
+        seq.tracks[0].push(new M.Rhythm(new M.Rational(1,1), 5));
+        seq.tracks[2].push(new M.Rhythm(new M.Rational(1,1), 5));
         
         var ctx = $('#canvas')[0].getContext('2d');
-        stack.draw(ctx, new M.Grid());
+        seq.draw(ctx, { x0: 0, x1: 480, y0: 0, y1: 480 });
     });
   </script>
  </head>
  <body>
-    <canvas id="canvas" width="640" height="480"></canvas>
+    <canvas id="canvas" width="640" height="480" style="border: 1px solid black"></canvas>
  </body>
 </html>
