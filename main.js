@@ -23,6 +23,14 @@ $$.Rational.prototype.asNumber = function() {
     return this.numerator / this.denominator;
 };
 
+$$.Rational.prototype.scale = function(n) {
+    return new $$.Rational(n*this.numerator, this.denominator);
+};
+
+$$.Rational.prototype.show = function() {
+    return "" + this.numerator + "/" + this.denominator;
+};
+
 
 // Like a Grid, but is actually a bounding box (rather than a y box and an x scale)
 $$.Bounds = function(x0, y0, x1, y1) {
@@ -80,6 +88,23 @@ $$.Rhythm.prototype.draw = function(ctx, grid, xbase) {
     var y0 = grid.locateY(0);
     var y1 = grid.locateY(1);
     ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+
+    var subdiv = this.subdiv.asNumber();
+    ctx.fillStyle = '#000000';
+    for (var i = 0; i < this.pattern.length; i++) {
+        let v = this.pattern[i];
+        if (v != 0) {
+            let x = grid.locateX(xbase+subdiv*i);
+            let y = grid.locateY(0.5);
+            ctx.globalAlpha = v/127;
+            ctx.fillRect(x-1,y-1,2,2);
+        }
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#000000';
+    ctx.font = '18px serif';
+    ctx.fillText(this.subdiv.scale(this.pattern.length).show(), x0, y0+24);
 };
 
 $$.Rhythm.prototype.play = function(midi, t0, dt) {
@@ -117,7 +142,7 @@ $$.Palette.prototype.draw = function(ctx, grid) {
             ctx.strokeRect(grid.locateX(x), grid.locateY(0), grid.locateX(x+size)-grid.locateX(x), grid.locateY(1)-grid.locateY(0));
         }
         ctx.fillStyle = '#000000';
-        ctx.font = '24px serif';
+        ctx.font = '18px serif';
         ctx.fillText(this._rhythms[i].count, grid.locateX(x)+12, grid.locateY(1)-12);
         x += size + 1;
     }
@@ -233,8 +258,8 @@ $$.Game = function(numtracks, bounds) {
     this.palettes = [];
     for (var i = 0; i < numtracks; i++) {
         let pal = new $$.Palette();
-        pal.add(this.genRhythm(), 4);
-        pal.add(this.genRhythm(), 4);
+        pal.add(this.genRhythm(), 10);
+        pal.add(this.genRhythm(), 10);
         this.palettes.push(pal);
     }
 
@@ -266,7 +291,21 @@ $$.Game.prototype.draw = function(ctx) {
 };
 
 $$.Game.prototype.genRhythm = function() {
-    return new $$.Rhythm(new $$.Rational(1,1), 1, 64, [96,0,96,96,0,96,0,0]);
+    var channel = Math.floor(Math.random()*4);
+    var note = Math.floor(Math.random()*(83-36))+36;
+
+    var len = [4,5,6,8,10,12][Math.floor(Math.random()*6)];
+    var vels = [];
+    for (var i = 0; i < len; i++) {
+        if (Math.random() < 0.5) {
+            vels.push(0);
+        }
+        else {
+            vels.push(Math.floor(Math.random()*(127-32)+32));
+        }
+    }
+
+    return new $$.Rhythm(new $$.Rational(1,2), channel, note, vels);
 };
 
 $$.Game.prototype.insert = function() {
