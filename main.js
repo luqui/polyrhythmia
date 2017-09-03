@@ -1,6 +1,6 @@
 var PolyrhythmiaModule = function(jQuery) {
 
-$$ = {};
+var $$ = {};
 
 var gcd = function(a,b) {
     if (b > a) {var temp = a; a = b; b = temp;}
@@ -57,6 +57,10 @@ $$.Grid.prototype.locateY = function(y) {
     return((this.y1-this.y0)*y + this.y0);
 };
 
+$$.Grid.prototype.restrictY = function(start, height) {
+    return new $$.Grid(this.x0, this.y0 + (this.y1-this.y0)*start, this.x1, this.y0 + (this.y1-this.y0)*(start + height));
+};
+
 
 $$.Stack = function() {
     this.symbols = [];
@@ -97,6 +101,7 @@ $$.Rhythm.prototype.draw = function(ctx, grid, xbase) {
 $$.Sequence = function(numtracks, bounds) {
     this.tracks = [];
     this.bounds = bounds;
+    this.grid = new $$.Grid(bounds.x0, bounds.y0, 10, bounds.y1);
     for (var i = 0; i < numtracks; i++) {
         this.tracks.push(new $$.Stack());
     }
@@ -107,11 +112,7 @@ $$.Sequence.prototype.draw = function(ctx) {
         let dy = (this.bounds.y1 - this.bounds.y0)/this.tracks.length;
         this.tracks[i].draw(
             ctx, 
-            new $$.Grid(this.bounds.x0, 
-                        this.bounds.y0 + i*dy,
-                        this.bounds.x0 + (this.bounds.x1 - this.bounds.x0) / 100,
-                        this.bounds.y0 + (i+1)*dy));
-
+            this.grid.restrictY(i / this.tracks.length, 1 / this.tracks.length));
     }
 };
 
@@ -127,10 +128,11 @@ $$.Game = function(numtracks, bounds) {
     var slice = this.bounds.sliceX(0.75);
     this.sequence = new $$.Sequence(numtracks, slice[0]);
     
-
     this.piece = new $$.Rhythm(new $$.Rational(1,1), 10);
     this.pieceColBounds = slice[1];
     this.pieceRow = 0;
+
+    this.time = 0;
 };
 
 $$.Game.prototype.draw = function(ctx) {
@@ -139,6 +141,12 @@ $$.Game.prototype.draw = function(ctx) {
         let ybounds = this.sequence.rowYBounds(this.pieceRow);
         this.piece.draw(ctx, new $$.Grid(this.pieceColBounds.x0, ybounds[0], this.pieceColBounds.x0 + 10, ybounds[1]), 0);
     }
+
+    ctx.strokeStyle = '#00ff00';
+    ctx.beginPath();
+    ctx.moveTo(this.sequence.grid.locateX(this.time), this.sequence.grid.locateY(0));
+    ctx.lineTo(this.sequence.grid.locateX(this.time), this.sequence.grid.locateY(1));
+    ctx.stroke();
 };
 
 $$.Game.prototype.insert = function() {

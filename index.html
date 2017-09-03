@@ -5,11 +5,16 @@
    integrity="sha256-DZAnKJ/6XZ9si04Hgrsxu/8s717jcIzLy3oi35EouyE="
    crossorigin="anonymous"></script>
   <script src="main.js"></script>
+  <script src="midi.js"></script>
   <script>
     jQuery(function() {
         var M = PolyrhythmiaModule(jQuery);
-        var game = new M.Game(3, new $$.Bounds(0, 0, 640, 480));
+        var game = new M.Game(3, new M.Bounds(0, 0, 640, 480));
         
+        var MIDI = MidiModule();
+        MIDI.open(navigator, function(midiobj) {
+            midiobj.noteOn(0, 64, 127);
+        });
 
         var redraw = function() {
             var ctx = $('#canvas')[0].getContext('2d');
@@ -18,7 +23,7 @@
         };
 
         $(document).keydown(function(e) {
-            console.log(e.which);
+            var handled = true;
             switch (e.which) {
                 case 32: // space
                     game.insert();
@@ -36,8 +41,12 @@
                     game.nextTrack();
                     redraw();
                     break;
+                default:
+                    handled = false;
             }
-            e.preventDefault();
+            if (handled) {
+                e.preventDefault();
+            }
         });
 
         redraw();
