@@ -94,6 +94,31 @@ $$.Rhythm.prototype.play = function(midi, t0, dt) {
 };
 
 
+$$.Palette = function() {
+    this._rhythms = [];
+    this._selected = null;
+};
+
+$$.Palette.prototype.add = function(rhythm, count) {
+    this._rhythms.push({ rhythm: rhythm, count: count });
+    if (this._selected === null) {
+        this._selected = 0;
+    }
+};
+
+$$.Palette.prototype.draw = function(ctx, grid) {
+    var x = 0;
+    for (var i = 0; i < this._rhythms.length; i++) {
+        let size = this._rhythms[i].size() 
+        this._rhythms[i].draw(ctx, grid, x);
+        if (i == this._selected) {
+            ctx.strokeStyle = '#00ff00';
+            ctx.strokeRect(grid.locateX(x), grid.locateY(0), grid.locateX(x + size), grid.locateY(1));
+        }
+        x += size + 1;
+    }
+};
+
 
 $$.Stack = function() {
     this.symbols = [];
@@ -131,33 +156,45 @@ $$.Stack.prototype.play = function(midi, t0, dt) {
 
 
 $$.Sequence = function(numtracks, bounds) {
-    this.tracks = [];
-    this.bounds = bounds;
-    this.grid = new $$.Grid(bounds.x0, bounds.y0, 10, bounds.y1);
+    this._tracks = [];
+    this._bounds = bounds;
+    this._grid = new $$.Grid(bounds.x0, bounds.y0, 10, bounds.y1);
     for (var i = 0; i < numtracks; i++) {
-        this.tracks.push(new $$.Stack());
+        this._tracks.push(new $$.Stack());
     }
 };
 
 $$.Sequence.prototype.draw = function(ctx) {
-    for (var i = 0; i < this.tracks.length; i++) {
-        let dy = (this.bounds.y1 - this.bounds.y0)/this.tracks.length;
-        this.tracks[i].draw(
+    for (var i = 0; i < this._tracks.length; i++) {
+        let dy = (this._bounds.y1 - this._bounds.y0)/this._tracks.length;
+        this._tracks[i].draw(
             ctx, 
-            this.grid.restrictY(i / this.tracks.length, 1 / this.tracks.length));
+            this._grid.restrictY(i / this._tracks.length, 1 / this._tracks.length));
     }
 };
 
 $$.Sequence.prototype.rowYBounds = function(row) {
-    let dy = (this.bounds.y1 - this.bounds.y0) / this.tracks.length;
-    let r = [ this.bounds.y0 + row*dy, this.bounds.y0 + (row+1)*dy ];
+    let dy = (this._bounds.y1 - this._bounds.y0) / this._tracks.length;
+    let r = [ this._bounds.y0 + row*dy, this._bounds.y0 + (row+1)*dy ];
     return r;
 };
 
 $$.Sequence.prototype.play = function(midi, t0, dt) {
-    for (var i = 0; i < this.tracks.length; i++) {
-        this.tracks[i].play(midi, t0, dt);
+    for (var i = 0; i < this._tracks.length; i++) {
+        this._tracks[i].play(midi, t0, dt);
     }
+};
+
+$$.Sequence.prototype.grid = function() {
+    return this._grid;
+};
+
+$$.Sequence.prototype.insert = function(track, rhythm) {
+    this._tracks[track].push(rhythm);
+};
+
+$$.Sequence.prototype.numTracks = function() {
+    return this._tracks.length;
 };
 
 
@@ -180,10 +217,11 @@ $$.Game.prototype.draw = function(ctx) {
         this.piece.draw(ctx, new $$.Grid(this.pieceColBounds.x0, ybounds[0], this.pieceColBounds.x0 + 10, ybounds[1]), 0);
     }
 
+    let grid = this.sequence.grid();
     ctx.strokeStyle = '#00ff00';
     ctx.beginPath();
-    ctx.moveTo(this.sequence.grid.locateX(this.time), this.sequence.grid.locateY(0));
-    ctx.lineTo(this.sequence.grid.locateX(this.time), this.sequence.grid.locateY(1));
+    ctx.moveTo(grid.locateX(this.time), grid.locateY(0));
+    ctx.lineTo(grid.locateX(this.time), grid.locateY(1));
     ctx.stroke();
 };
 
@@ -193,7 +231,7 @@ $$.Game.prototype.genRhythm = function() {
 
 $$.Game.prototype.insert = function() {
     if (this.piece) {
-        this.sequence.tracks[this.pieceRow].push(this.piece);
+        this.sequence.insert(this.pieceRow, this.piece);
         this.piece = this.genRhythm();
     }
 };
@@ -203,7 +241,7 @@ $$.Game.prototype.prevTrack = function() {
 };
 
 $$.Game.prototype.nextTrack = function() {
-    if (this.pieceRow < this.sequence.tracks.length-1) { this.pieceRow++; }
+    if (this.pieceRow < this.sequence.numTracks()-1) { this.pieceRow++; }
 };
 
 $$.Game.prototype.advance = function(midi, dt) {
