@@ -109,13 +109,35 @@ $$.Palette.prototype.add = function(rhythm, count) {
 $$.Palette.prototype.draw = function(ctx, grid) {
     var x = 0;
     for (var i = 0; i < this._rhythms.length; i++) {
-        let size = this._rhythms[i].size() 
-        this._rhythms[i].draw(ctx, grid, x);
+        let size = this._rhythms[i].rhythm.size() 
+        this._rhythms[i].rhythm.draw(ctx, grid, x);
         if (i == this._selected) {
-            ctx.strokeStyle = '#00ff00';
-            ctx.strokeRect(grid.locateX(x), grid.locateY(0), grid.locateX(x + size), grid.locateY(1));
+            ctx.strokeStyle = '#0000ff';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(grid.locateX(x), grid.locateY(0), grid.locateX(x+size)-grid.locateX(x), grid.locateY(1)-grid.locateY(0));
         }
         x += size + 1;
+    }
+};
+
+$$.Palette.prototype.nextItem = function() {
+    if (this._rhythms && this._selected < this._rhythms.length-1) {
+        this._selected++;
+    }
+};
+
+$$.Palette.prototype.prevItem = function() {
+    if (this._rhythms && this._selected > 0) {
+        this._selected--;
+    }
+};
+
+$$.Palette.prototype.current = function() {
+    if (this._rhythms) {
+        return this._rhythms[this._selected].rhythm;
+    }
+    else {
+        return null;
     }
 };
 
@@ -202,27 +224,41 @@ $$.Game = function(numtracks, bounds) {
     this.bounds = bounds;
     var slice = this.bounds.sliceX(0.75);
     this.sequence = new $$.Sequence(numtracks, slice[0]);
-    
-    this.piece = this.genRhythm();
-    this.pieceColBounds = slice[1];
-    this.pieceRow = 0;
-
     this.time = -1e-3;  // so we play first note
+
+    this.palettes = [];
+    for (var i = 0; i < numtracks; i++) {
+        let pal = new $$.Palette();
+        pal.add(this.genRhythm());
+        pal.add(this.genRhythm());
+        this.palettes.push(pal);
+    }
+
+    this.paletteBounds = slice[1];
+    this.activeRow = 0;
 };
 
 $$.Game.prototype.draw = function(ctx) {
     this.sequence.draw(ctx);
-    if (this.piece) {
-        let ybounds = this.sequence.rowYBounds(this.pieceRow);
-        this.piece.draw(ctx, new $$.Grid(this.pieceColBounds.x0, ybounds[0], this.pieceColBounds.x0 + 10, ybounds[1]), 0);
-    }
 
     let grid = this.sequence.grid();
     ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(grid.locateX(this.time), grid.locateY(0));
     ctx.lineTo(grid.locateX(this.time), grid.locateY(1));
     ctx.stroke();
+
+    for (var i = 0; i < this.palettes.length; i++) {
+        let ybounds = this.sequence.rowYBounds(i);
+        this.palettes[i].draw(ctx, 
+            new $$.Grid(this.paletteBounds.x0, ybounds[0], this.paletteBounds.x0+10, ybounds[1]));
+        if (this.activeRow == i) {
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 5;
+            ctx.strokeRect(this.paletteBounds.x0, ybounds[0], this.paletteBounds.x1-this.paletteBounds.x0, ybounds[1]-ybounds[0]);
+        }
+    }
 };
 
 $$.Game.prototype.genRhythm = function() {
@@ -230,18 +266,26 @@ $$.Game.prototype.genRhythm = function() {
 };
 
 $$.Game.prototype.insert = function() {
-    if (this.piece) {
-        this.sequence.insert(this.pieceRow, this.piece);
-        this.piece = this.genRhythm();
+    var rhythm = this.palettes[this.activeRow].current();
+    if (rhythm) {
+        this.sequence.insert(this.activeRow, rhythm);
     }
 };
 
 $$.Game.prototype.prevTrack = function() {
-    if (this.pieceRow > 0) { this.pieceRow--; }
+    if (this.activeRow > 0) { this.activeRow--; }
 };
 
 $$.Game.prototype.nextTrack = function() {
-    if (this.pieceRow < this.sequence.numTracks()-1) { this.pieceRow++; }
+    if (this.activeRow < this.palettes.length-1) { this.activeRow++; }
+};
+
+$$.Game.prototype.prevItem = function() {
+    this.palettes[this.activeRow].prevItem();
+};
+
+$$.Game.prototype.nextItem = function() {
+    this.palettes[this.activeRow].nextItem();
 };
 
 $$.Game.prototype.advance = function(midi, dt) {

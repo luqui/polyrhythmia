@@ -10,7 +10,7 @@
     jQuery(function() {
         var M = PolyrhythmiaModule(jQuery);
         var MIDI = MidiModule();
-        var game = new M.Game(3, new M.Bounds(0, 0, 640, 480));
+        var game = new M.Game(3, new M.Bounds(0, 0, 900, 480));
 
         var midi = null;
 
@@ -51,12 +51,16 @@
                     gameLoop();
                     break;
                 case 37: // left
+                    game.prevItem();
+                    redraw();
                     break;
                 case 38: // up
                     game.prevTrack();
                     redraw();
                     break;
                 case 39: // right
+                    game.nextItem();
+                    redraw();
                     break;
                 case 40: // down
                     game.nextTrack();
