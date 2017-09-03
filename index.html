@@ -1,0 +1,22 @@
+<html>
+ <head>
+  <script
+   src="https://code.jquery.com/jquery-3.2.1.js"
+   integrity="sha256-DZAnKJ/6XZ9si04Hgrsxu/8s717jcIzLy3oi35EouyE="
+   crossorigin="anonymous"></script>
+  <script src="main.js"></script>
+  <script>
+    jQuery(function() {
+        var M = PolyrhythmiaModule(jQuery);
+        var stack = new M.Stack();
+        stack.symbols.push(new M.Rhythm(new M.Rational(1,1), 10), new M.Rhythm(new M.Rational(1,1), 20));
+        
+        var ctx = $('#canvas')[0].getContext('2d');
+        stack.draw(ctx, new M.Grid());
+    });
+  </script>
+ </head>
+ <body>
+    <canvas id="canvas" width="640" height="480"></canvas>
+ </body>
+</html>

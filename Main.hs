@@ -2,7 +2,7 @@
 
 import qualified System.MIDI as MIDI
 import Control.Concurrent (threadDelay, forkIO)
-import Control.Monad (filterM, forM_)
+import Control.Monad (filterM, forM_, when)
 import Data.Word (Word32)
 import Control.Concurrent.MVar
 import Control.Monad.Random
@@ -32,9 +32,9 @@ rhythmThread conn rhythm = do
     let times = take (rLength rhythm) [starttime, starttime + rTiming rhythm ..]
     forM_ (zip times (cycle (rNotes rhythm))) $ \(t,vel) -> do
         waitTill conn t
-        MIDI.send conn (MIDI.MidiMessage (rChannel rhythm) (MIDI.NoteOn (rNote rhythm) 0))
         MIDI.send conn (MIDI.MidiMessage (rChannel rhythm) (MIDI.NoteOn (rNote rhythm) vel))
-    MIDI.send conn (MIDI.MidiMessage (rChannel rhythm) (MIDI.NoteOn (rNote rhythm) 0))
+        waitTill conn (t + rTiming rhythm / 2)
+        MIDI.send conn (MIDI.MidiMessage (rChannel rhythm) (MIDI.NoteOn (rNote rhythm) 0))
 
 waitTill :: MIDI.Connection -> Time -> IO ()
 waitTill conn target = do
@@ -46,6 +46,9 @@ rhythmMain conn state rhythm = forkIO_ $ do
     modMVar state (rhythm:)
     rhythmThread conn rhythm
     modMVar state (delete rhythm)
+    rhythms <- readMVar state
+    when (null rhythms) $ do
+        rhythmMain conn state rhythm
 
 modMVar v = modifyMVar_ v . (return .)
 
