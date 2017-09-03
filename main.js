@@ -62,30 +62,15 @@ $$.Grid.prototype.restrictY = function(start, height) {
 };
 
 
-$$.Stack = function() {
-    this.symbols = [];
-};
-
-$$.Stack.prototype.draw = function(ctx, grid) {
-    var accum = 0;
-    for (var i = 0; i < this.symbols.length; i++) {
-        this.symbols[i].draw(ctx, grid, accum);
-        accum += this.symbols[i].size();
-    }
-};
-
-$$.Stack.prototype.push = function(symbol) {
-    this.symbols.push(symbol);
-};
-
-
-$$.Rhythm = function(subdiv, patternlen) {
+$$.Rhythm = function(subdiv, ch, note, pattern) {
     this.subdiv = subdiv;
-    this.patternlen = patternlen;
+    this.channel = ch;
+    this.note = note;
+    this.pattern = pattern;
 };
 
 $$.Rhythm.prototype.size = function() {
-    return this.patternlen * this.subdiv.asNumber();
+    return this.pattern.length * this.subdiv.asNumber();
 };
 
 $$.Rhythm.prototype.draw = function(ctx, grid, xbase) {
@@ -95,6 +80,53 @@ $$.Rhythm.prototype.draw = function(ctx, grid, xbase) {
     var y0 = grid.locateY(0);
     var y1 = grid.locateY(1);
     ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+};
+
+$$.Rhythm.prototype.play = function(midi, t0, dt) {
+    var div = this.subdiv.asNumber();
+    var ix0 = Math.floor(t0/div)+1;
+    var ix1 = Math.floor((t0+dt)/div);
+    while (ix0 <= ix1 && ix0 < this.pattern.length) {
+        console.log("note on ", ix0);
+        midi.noteOn(this.channel, this.note, this.pattern[ix0]);
+        ix0++;
+    }
+};
+
+
+
+$$.Stack = function() {
+    this.symbols = [];
+};
+
+$$.Stack.prototype.draw = function(ctx, grid) {
+    var accum = 0;
+    for (var i = 0; i < this.symbols.length; i++) {
+        this.symbols[i].symbol.draw(ctx, grid, accum);
+        accum = this.symbols[i].endtime;
+    }
+};
+
+$$.Stack.prototype.push = function(symbol) {
+    if (this.symbols.length == 0) {
+        var endtime = 0;
+    }
+    else {
+        var endtime = this.symbols[this.symbols.length-1].endtime;
+    }
+    this.symbols.push({ symbol: symbol, endtime: endtime + symbol.size() });
+};
+
+$$.Stack.prototype.play = function(midi, t0, dt) {
+    var starttime = 0;
+    var i;
+    for (i = 0; i < this.symbols.length; i++) {
+        if (t0 + dt >= starttime && t0 < this.symbols[i].endtime) {
+            this.symbols[i].symbol.play(midi, t0 - starttime, dt);
+        }
+        starttime = this.symbols[i].endtime;
+        if (starttime > t0+dt) { break; }
+    }
 };
 
 
@@ -122,17 +154,23 @@ $$.Sequence.prototype.rowYBounds = function(row) {
     return r;
 };
 
+$$.Sequence.prototype.play = function(midi, t0, dt) {
+    for (var i = 0; i < this.tracks.length; i++) {
+        this.tracks[i].play(midi, t0, dt);
+    }
+};
+
 
 $$.Game = function(numtracks, bounds) {
     this.bounds = bounds;
     var slice = this.bounds.sliceX(0.75);
     this.sequence = new $$.Sequence(numtracks, slice[0]);
     
-    this.piece = new $$.Rhythm(new $$.Rational(1,1), 10);
+    this.piece = this.genRhythm();
     this.pieceColBounds = slice[1];
     this.pieceRow = 0;
 
-    this.time = 0;
+    this.time = -1e-3;  // so we play first note
 };
 
 $$.Game.prototype.draw = function(ctx) {
@@ -149,10 +187,14 @@ $$.Game.prototype.draw = function(ctx) {
     ctx.stroke();
 };
 
+$$.Game.prototype.genRhythm = function() {
+    return new $$.Rhythm(new $$.Rational(1,1), 1, 64, [96,0,96,96,0,96,0,0]);
+};
+
 $$.Game.prototype.insert = function() {
     if (this.piece) {
         this.sequence.tracks[this.pieceRow].push(this.piece);
-        this.piece = new $$.Rhythm(new $$.Rational(1,1), 10);
+        this.piece = this.genRhythm();
     }
 };
 
@@ -162,6 +204,11 @@ $$.Game.prototype.prevTrack = function() {
 
 $$.Game.prototype.nextTrack = function() {
     if (this.pieceRow < this.sequence.tracks.length-1) { this.pieceRow++; }
+};
+
+$$.Game.prototype.advance = function(midi, dt) {
+    this.sequence.play(midi, this.time, dt);
+    this.time += dt;
 };
 
 return $$;

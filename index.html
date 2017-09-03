@@ -9,11 +9,13 @@
   <script>
     jQuery(function() {
         var M = PolyrhythmiaModule(jQuery);
-        var game = new M.Game(3, new M.Bounds(0, 0, 640, 480));
-        
         var MIDI = MidiModule();
+        var game = new M.Game(3, new M.Bounds(0, 0, 640, 480));
+
+        var midi = null;
+
         MIDI.open(navigator, function(midiobj) {
-            midiobj.noteOn(0, 64, 127);
+            midi = midiobj;
         });
 
         var redraw = function() {
@@ -22,12 +24,31 @@
             game.draw(ctx);
         };
 
+        var running = false;
+        var gameLoop = function() {
+            if (running) { return; }
+            if (!midi) { return; }
+            running = true;
+            var lastUpdate = Date.now();
+            var step = function() {
+                var time = Date.now();
+                var dt = (time - lastUpdate)/1000;
+                lastUpdate = time;
+
+                game.advance(midi, dt);
+                redraw();
+                setTimeout(step, 30);
+            };
+            setTimeout(step, 30);
+        };
+
         $(document).keydown(function(e) {
             var handled = true;
             switch (e.which) {
                 case 32: // space
                     game.insert();
                     redraw();
+                    gameLoop();
                     break;
                 case 37: // left
                     break;
