@@ -8,13 +8,10 @@
   <script>
     jQuery(function() {
         var M = PolyrhythmiaModule(jQuery);
-        var seq = new M.Sequence(3);
-        seq.tracks[0].push(new M.Rhythm(new M.Rational(1,1), 10));
-        seq.tracks[0].push(new M.Rhythm(new M.Rational(1,1), 5));
-        seq.tracks[2].push(new M.Rhythm(new M.Rational(1,1), 5));
+        var game = new M.Game(3, new $$.Bounds(0, 0, 640, 480));
         
         var ctx = $('#canvas')[0].getContext('2d');
-        seq.draw(ctx, { x0: 0, x1: 480, y0: 0, y1: 480 });
+        game.draw(ctx);
     });
   </script>
  </head>
