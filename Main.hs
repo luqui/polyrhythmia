@@ -1,13 +1,16 @@
 {-# LANGUAGE BangPatterns #-}
 
 import qualified System.MIDI as MIDI
+import qualified Data.Set as Set
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Data.Word (Word32)
+import Data.Foldable (toList)
+import Data.Semigroup ((<>))
 import Control.Concurrent.MVar
 import Control.Monad.Random
 import Data.Ratio
-import Data.List (delete)
+import Data.List (delete, insert)
 import System.Console.ANSI (clearScreen, setCursorPosition)
 
 
@@ -16,13 +19,18 @@ openConn = MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") .
 
 type Time = Rational  -- millisecs
 
+data State = State {
+  sActive :: Set.Set Rhythm,
+  sInactive :: Set.Set Rhythm
+ }
+
 data Rhythm = Rhythm {
     rTiming :: Rational,
     rNotes :: [Int],
     rLength :: Int,
     rChannel :: Int,  -- 1-4
     rNote :: Int }  -- 36-83
-    deriving (Eq)
+    deriving (Eq, Ord)
 
 
 rhythmThread :: MIDI.Connection -> Rhythm -> IO ()
@@ -41,33 +49,33 @@ waitTill conn target = do
     now <- fromIntegral <$> MIDI.currentTime conn
     threadDelay (floor (1000 * (target - now)))
 
-rhythmMain :: MIDI.Connection -> MVar [Rhythm] -> Rhythm -> IO ()
-rhythmMain conn state rhythm = forkIO_ $ do
-    modMVar state (rhythm:)
+rhythmMain :: MIDI.Connection -> MVar State -> Rhythm -> IO ()
+rhythmMain conn stateVar rhythm = forkIO_ $ do
+    modMVar stateVar $ \s -> s { sActive = Set.insert rhythm (sActive s)} 
     rhythmThread conn rhythm
-    modMVar state (delete rhythm)
-    rhythms <- readMVar state
-    when (null rhythms) $ do
-        rhythmMain conn state rhythm
+    modMVar stateVar $ \s -> s { sActive = Set.delete rhythm (sActive s)
+                               , sInactive = Set.insert rhythm (sInactive s)
+                             }
 
 modMVar v = modifyMVar_ v . (return .)
 
 mainThread :: MIDI.Connection -> IO ()
 mainThread conn = do
-    state <- newMVar []
+    stateVar <- newMVar $ State { sActive = Set.empty, sInactive = Set.empty }
     forkIO_ . forever $ do
-        rhythms <- readMVar state
+        state <- readMVar stateVar
         clearScreen
         setCursorPosition 0 0
-        let timebase = foldr gcdRat 0 (map rTiming rhythms)
-        mapM_ (putStrLn . renderRhythm timebase) (reverse rhythms)
+        let timebase = foldr gcdRat 0 (map rTiming (toList (sActive state)))
+        mapM_ (putStrLn . renderRhythm timebase) (reverse (toList (sActive state)))
         threadDelay 1000000
     forever $ do
-        rhythms <- length <$> readMVar state
-        rhythm <- evalRandIO . makeDerivedRhythm =<< readMVar state
-        case rhythm of
-            Just r -> rhythmMain conn state r
-            Nothing -> return ()
+        state <- readMVar stateVar
+        r <- evalRandIO $ do
+            pastr <- makeDerivedRhythm (toList (sActive state))
+            newr <- choosePastRhythm state
+            uniform [pastr `mplus` newr, newr `mplus` pastr]
+        maybe (return ()) (rhythmMain conn stateVar) r
         waitTime <- evalRandIO $ getRandomR (1,30)
         threadDelay (waitTime*1000000)
 
@@ -75,7 +83,7 @@ type Cloud = Rand StdGen
 
 makeRhythm :: Rational -> Cloud Rhythm
 makeRhythm timing = do
-    numNotes <- uniform [3,3,4,4,4,5,6,6,8,8,9,10,12,15,16]
+    numNotes <- uniform [3,3,4,4,4,4,5,6,6,6,6,8,8,9,10,12,15,16]
     notes <- id =<< (sequenceA <$> replicateM numNotes (uniform [return 0, getRandomR (32,127)]))
     len <- (length notes *) . (2^) <$> getRandomR (2,7 :: Int)
     channel <- getRandomR (1, 4)
@@ -85,14 +93,16 @@ makeRhythm timing = do
 intervals :: [Rational]
 intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2, 3, 4, 6]
 
+
+choosePastRhythm :: State -> Cloud (Maybe Rhythm)
+choosePastRhythm state = do
+  let base = foldr gcdRat 0 . map rTiming . toList $ sActive state
+  let possible = filter (\p -> base == 0 || (rTiming p / base) `elem` intervals) . toList $ sInactive state
+  uniformMay possible
+
+
 makeDerivedRhythm :: [Rhythm] -> Cloud (Maybe Rhythm)
 makeDerivedRhythm [] = Just <$> makeRhythm (1000/4)
-makeDerivedRhythm [r] = do
-    let timings = (rTiming r *) <$> intervals 
-    let timings' = filter (\t -> 1000/8 < t && t < 1000) timings
-    if null timings'
-        then return Nothing
-        else fmap Just . makeRhythm =<< uniform timings'
 makeDerivedRhythm rs = do
     let base = foldr1 gcdRat (map rTiming rs)
     let timings = (base *) <$> intervals
