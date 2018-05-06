@@ -2,6 +2,7 @@
 
 import qualified System.MIDI as MIDI
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Data.Word (Word32)
@@ -29,8 +30,11 @@ data Rhythm = Rhythm {
     rNotes :: [Int],
     rLength :: Int,
     rChannel :: Int,  -- 1-4
-    rNote :: Int }  -- 36-83
+    rNote :: Int,  
+    rRole :: String } 
     deriving (Eq, Ord)
+
+type Kit = Map.Map String [Int]
 
 
 rhythmThread :: MIDI.Connection -> Rhythm -> IO ()
@@ -59,8 +63,8 @@ rhythmMain conn stateVar rhythm = forkIO_ $ do
 
 modMVar v = modifyMVar_ v . (return .)
 
-mainThread :: MIDI.Connection -> IO ()
-mainThread conn = do
+mainThread :: Kit -> MIDI.Connection -> IO ()
+mainThread kit conn = do
     stateVar <- newMVar $ State { sActive = Set.empty, sInactive = Set.empty }
     forkIO_ . forever $ do
         state <- readMVar stateVar
@@ -72,7 +76,7 @@ mainThread conn = do
     forever $ do
         state <- readMVar stateVar
         r <- evalRandIO $ do
-            pastr <- makeDerivedRhythm (toList (sActive state))
+            pastr <- makeDerivedRhythm kit (toList (sActive state))
             newr <- choosePastRhythm state
             uniform [pastr `mplus` newr, newr `mplus` pastr]
         maybe (return ()) (rhythmMain conn stateVar) r
@@ -81,14 +85,20 @@ mainThread conn = do
 
 type Cloud = Rand StdGen
 
-makeRhythm :: Rational -> Cloud Rhythm
-makeRhythm timing = do
-    numNotes <- uniform [3,3,4,4,4,4,5,6,6,6,6,8,8,9,10,12,15,16]
+makeRhythmRole :: Kit -> String -> Rational -> Cloud Rhythm
+makeRhythmRole kit role timing = do
+    numNotes <- --uniform [3,3,4,4,4,4,5,6,6,6,6,8,8,9,10,12,15,16]
+                uniform [3,4,6]
     notes <- id =<< (sequenceA <$> replicateM numNotes (uniform [return 0, getRandomR (32,127)]))
-    len <- (length notes *) . (2^) <$> getRandomR (2,7 :: Int)
+    len <- (2^) <$> getRandomR (4,8 :: Int)
     channel <- getRandomR (1, 4)
-    note <- getRandomR (36, 83)
-    return $ Rhythm timing notes len channel note
+    note <- uniform (kit Map.! role)
+    return $ Rhythm timing notes len channel note role
+
+makeRhythm :: Kit -> Rational -> Cloud Rhythm
+makeRhythm kit timing = do
+    role <- uniform (Map.keys kit)
+    makeRhythmRole kit role timing
 
 intervals :: [Rational]
 intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2, 3, 4, 6]
@@ -97,23 +107,26 @@ intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2, 3, 4, 6]
 choosePastRhythm :: State -> Cloud (Maybe Rhythm)
 choosePastRhythm state = do
   let base = foldr gcdRat 0 . map rTiming . toList $ sActive state
-  let possible = filter (\p -> base == 0 || (rTiming p / base) `elem` intervals) . toList $ sInactive state
+  let possible = filter (\p -> (base == 0 || (rTiming p / base) `elem` intervals)
+                            && rRole p `notElem` map rRole (toList (sActive state)))
+                . toList $ sInactive state
   uniformMay possible
 
 
-makeDerivedRhythm :: [Rhythm] -> Cloud (Maybe Rhythm)
-makeDerivedRhythm [] = Just <$> makeRhythm (1000/4)
-makeDerivedRhythm rs = do
+makeDerivedRhythm :: Kit -> [Rhythm] -> Cloud (Maybe Rhythm)
+makeDerivedRhythm kit [] = Just <$> makeRhythm kit (1000/4)
+makeDerivedRhythm kit rs = do
+    role <- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
     let base = foldr1 gcdRat (map rTiming rs)
     let timings = (base *) <$> intervals
     let timings' = filter (\t -> 1000/8 < t && t < 1000) timings
-    if null timings'
-        then return Nothing
-        else fmap Just . makeRhythm =<< uniform timings'
+    case role of
+        Just r | not (null timings') -> fmap Just . makeRhythmRole kit r =<< uniform timings'
+        _ -> return Nothing
 
 renderRhythm :: Rational -> Rhythm -> String
 renderRhythm timebase rhythm = 
-    "|" ++ concat [ renderVel v ++ replicate (spacing - 1) ' ' | v <- rNotes rhythm ] ++ "|"
+    rRole rhythm ++ " |" ++ concat [ renderVel v ++ replicate (spacing - 1) ' ' | v <- rNotes rhythm ] ++ "|"
     where
     spacing = floor (rTiming rhythm / timebase)
     renderVel v | v == 0    = "."
@@ -123,9 +136,20 @@ renderRhythm timebase rhythm =
 gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
 
+repThatKit :: Kit
+repThatKit = Map.fromList [
+  "kick"  --> [48, 49, 60, 61, 72, 73],
+  "snare" --> [50, 51, 52, 62, 63, 64, 74, 75, 76],
+  "hat"   --> [42, 46, 54, 56, 58, 66, 68, 70, 78, 80, 82],
+  "ride"  --> [59, 71, 83],
+  "perc"  --> [43, 53, 55, 65, 67, 77, 79]
+  ]
+  where
+  (-->) = (,)
+
 main = do
     !conn <- openConn
     MIDI.start conn
-    mainThread conn
+    mainThread repThatKit conn
 
 forkIO_ a = forkIO a >> return ()
