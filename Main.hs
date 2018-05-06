@@ -84,7 +84,7 @@ mainThread chkit conn = do
         threadDelay 1000000
     forever $ do
         forkIO $ hand stateVar
-        delay <- evalRandIO $ getRandomR (10*10^6,30*10^6)
+        delay <- evalRandIO $ getRandomR (5*10^6,15*10^6)
         threadDelay delay
   where
   hand stateVar = do
@@ -102,7 +102,7 @@ makeRhythmRole chkit role timing = do
     numNotes <- uniform [3,3,4,4,4,4,5,6,6,6,6,8,8,9,10,12,15,16]
     notes <- replicateM numNotes $
                 uncurry Note <$> uniform (chkit Map.! role) <*> (id =<< uniform [return 0, getRandomR (32,127)])
-    len <- (2^) <$> getRandomR (6,10 :: Int)
+    len <- round . (/timing) . fromIntegral <$> getRandomR (30000,120000::Int)  -- timing = msec
     return $ Rhythm timing notes len role
 
 makeRhythm :: ChKit -> Rational -> Cloud Rhythm
@@ -111,7 +111,7 @@ makeRhythm chkit timing = do
     makeRhythmRole chkit role timing
 
 intervals :: [Rational]
-intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2, 3, 4, 6]
+intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 1, 3/2, 2, 3, 4, 6]
 
 
 choosePastRhythm :: State -> Cloud (Maybe Rhythm)
