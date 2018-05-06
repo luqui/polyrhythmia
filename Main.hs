@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, TupleSections #-}
 
 import qualified System.MIDI as MIDI
 import qualified Data.Set as Set
@@ -26,30 +26,32 @@ data State = State {
   sInactive :: Set.Set Rhythm
  }
 
-data Note = Note Int Int
+data Note = Note Int Int Int  -- ch note vel
     deriving (Eq, Ord)
 
 data Rhythm = Rhythm {
     rTiming :: Rational,
     rNotes :: [Note],
     rLength :: Int,
-    rChannel :: Int,  -- 1-4
     rRole :: String } 
     deriving (Eq, Ord)
 
 type Kit = Map.Map String [Int]
 
+type ChKit = Map.Map String [(Int,Int)] -- channel, note
 
 rhythmThread :: MIDI.Connection -> Rhythm -> IO ()
 rhythmThread conn rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = rTiming rhythm * fromIntegral (floor (now / rTiming rhythm))
     let times = take (rLength rhythm) [starttime, starttime + rTiming rhythm ..]
-    forM_ (zip times (cycle (rNotes rhythm))) $ \(t,Note note vel) -> do
+    let velmod = replicate (rLength rhythm - 20) 1 ++ [1,1-1/20..1/20]
+    forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod,t,Note ch note vel) -> do
         waitTill conn t
-        MIDI.send conn (MIDI.MidiMessage (rChannel rhythm) (MIDI.NoteOn note vel))
+        let vel' = round (fromIntegral vel * vmod)
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
         waitTill conn (t + rTiming rhythm / 2)
-        MIDI.send conn (MIDI.MidiMessage (rChannel rhythm) (MIDI.NoteOn note 0))
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
 
 waitTill :: MIDI.Connection -> Time -> IO ()
 waitTill conn target = do
@@ -68,14 +70,15 @@ rhythmMain conn stateVar rhythm = do
 
 modMVar v = modifyMVar_ v . (return .)
 
-mainThread :: Kit -> MIDI.Connection -> IO ()
-mainThread kit conn = do
+mainThread :: ChKit -> MIDI.Connection -> IO ()
+mainThread chkit conn = do
     stateVar <- newMVar $ State { sActive = Set.empty, sInactive = Set.empty }
     forkIO . forever $ do
         state <- readMVar stateVar
         clearScreen
         setCursorPosition 0 0
         let timebase = foldr gcdRat 0 (map rTiming (toList (sActive state)))
+        print timebase
         mapM_ (putStrLn . renderRhythm timebase) (reverse (toList (sActive state)))
         hFlush stdout
         threadDelay 1000000
@@ -87,26 +90,25 @@ mainThread kit conn = do
   hand stateVar = do
     state <- readMVar stateVar
     r <- evalRandIO $ do
-        pastr <- makeDerivedRhythm kit (toList (sActive state))
+        pastr <- makeDerivedRhythm chkit (toList (sActive state))
         newr <- choosePastRhythm state
         uniform [pastr `mplus` newr, newr `mplus` pastr]
     maybe (return ()) (rhythmMain conn stateVar) r
 
 type Cloud = Rand StdGen
 
-makeRhythmRole :: Kit -> String -> Rational -> Cloud Rhythm
-makeRhythmRole kit role timing = do
+makeRhythmRole :: ChKit -> String -> Rational -> Cloud Rhythm
+makeRhythmRole chkit role timing = do
     numNotes <- uniform [3,3,4,4,4,4,5,6,6,6,6,8,8,9,10,12,15,16]
     notes <- replicateM numNotes $
-                Note <$> uniform (kit Map.! role) <*> (id =<< uniform [return 0, getRandomR (32,127)])
+                uncurry Note <$> uniform (chkit Map.! role) <*> (id =<< uniform [return 0, getRandomR (32,127)])
     len <- (2^) <$> getRandomR (6,10 :: Int)
-    channel <- getRandomR (1, 4)
-    return $ Rhythm timing notes len channel role
+    return $ Rhythm timing notes len role
 
-makeRhythm :: Kit -> Rational -> Cloud Rhythm
-makeRhythm kit timing = do
-    role <- uniform (Map.keys kit)
-    makeRhythmRole kit role timing
+makeRhythm :: ChKit -> Rational -> Cloud Rhythm
+makeRhythm chkit timing = do
+    role <- uniform (Map.keys chkit)
+    makeRhythmRole chkit role timing
 
 intervals :: [Rational]
 intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 3/4, 1, 4/3, 3/2, 2, 3, 4, 6]
@@ -121,15 +123,15 @@ choosePastRhythm state = do
   uniformMay possible
 
 
-makeDerivedRhythm :: Kit -> [Rhythm] -> Cloud (Maybe Rhythm)
-makeDerivedRhythm kit [] = Just <$> makeRhythm kit (1000/4)
-makeDerivedRhythm kit rs = do
-    role <- uniformMay (Map.keysSet kit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
+makeDerivedRhythm :: ChKit -> [Rhythm] -> Cloud (Maybe Rhythm)
+makeDerivedRhythm chkit [] = Just <$> makeRhythm chkit (1000/4)
+makeDerivedRhythm chkit rs = do
+    role <- uniformMay (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
     let base = foldr1 gcdRat (map rTiming rs)
-    let timings = [base] -- (base *) <$> intervals
+    let timings = (base *) <$> intervals
     let timings' = filter (\t -> 1000/8 < t && t < 1000) timings
     case role of
-        Just r | not (null timings') -> fmap Just . makeRhythmRole kit r =<< uniform timings'
+        Just r | not (null timings') -> fmap Just . makeRhythmRole chkit r =<< uniform timings'
         _ -> return Nothing
 
 renderRhythm :: Rational -> Rhythm -> String
@@ -137,9 +139,9 @@ renderRhythm timebase rhythm =
     rRole rhythm ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
     where
     spacing = floor (rTiming rhythm / timebase)
-    renderNote (Note _ v) | v == 0    = "."
-                          | v < 75    = "x"
-                          | otherwise = "X"
+    renderNote (Note _ _ v) | v == 0    = "."
+                            | v < 75    = "x"
+                            | otherwise = "X"
 
 gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
@@ -155,9 +157,27 @@ repThatKit = Map.fromList [
   where
   (-->) = (,)
 
+gamillionKit :: Kit
+gamillionKit = Map.fromList [
+  --"kick " --> [36, 37, 48, 49, 60, 61],
+  --"snare" --> [38, 39, 40, 50, 51, 52, 62, 63, 64],
+  --"hat  " --> [42, 44, 46, 54, 56, 58, 66, 68, 70],
+  "bell1" --> [41, 43, 45, 47],
+  "bell2" --> [53, 55, 57, 59],
+  "bell3" --> [65, 67, 69, 71],
+  "bell4" --> [72..83]
+  ]
+  where
+  (-->) = (,)
+
+makeChKit :: [(String, Int, Kit)] -> ChKit
+makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
+
+myKit = makeChKit [("bells", 2, gamillionKit), ("kit", 1, repThatKit)]
+
 main = do
     !conn <- openConn
     MIDI.start conn
-    mainThread repThatKit conn
+    mainThread myKit conn
 
 forkIO_ a = forkIO a >> return ()
