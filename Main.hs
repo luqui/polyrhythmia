@@ -79,8 +79,12 @@ mainThread chkit conn = do
         clearScreen
         setCursorPosition 0 0
         let timebase = foldr gcdRat 0 (map rTiming (toList (sActive state)))
-        print timebase
-        mapM_ (putStrLn . renderRhythm timebase) (reverse (toList (sActive state)))
+        putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
+        let period = foldr lcmRat 1 [ rTiming r * fromIntegral (length (rNotes r)) | r <- toList (sActive state) ]
+        putStrLn $ "period: " ++ show (round period) ++ "ms"
+
+        let padding = maximum [ length (rRole r) | r <- toList (sActive state) ]
+        mapM_ (putStrLn . renderRhythm timebase padding) (reverse (toList (sActive state)))
         hFlush stdout
         threadDelay 1000000
     forever $ do
@@ -157,14 +161,18 @@ makeDerivedRhythm chkit rs = do
       Just (timing, notes) -> Just <$> makeRhythmRole chkit role timing notes
       Nothing -> return Nothing
 
-renderRhythm :: Rational -> Rhythm -> String
-renderRhythm timebase rhythm = 
-    rRole rhythm ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
+renderRhythm :: Rational -> Int -> Rhythm -> String
+renderRhythm timebase padding rhythm = 
+    padString padding (rRole rhythm) 
+      ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
     where
     spacing = floor (rTiming rhythm / timebase)
     renderNote (Note _ _ v) | v == 0    = "."
                             | v < 75    = "x"
                             | otherwise = "X"
+
+padString :: Int -> String -> String
+padString p s = take p (s ++ repeat ' ')
 
 gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
@@ -196,10 +204,32 @@ gamillionKit = Map.fromList [
   where
   (-->) = (,)
 
+sAndBKit :: Kit
+sAndBKit = Map.fromList [
+  "kick" --> [36, 37, 48, 49, 60, 61, 72, 73, 84, 85],
+  "snare" --> [38, 39, 40, 50, 51, 52, 62, 63, 64, 74, 75],
+  "hat" --> [42, 44, 46, 54, 56, 58, 66],
+  "perc1" --> [41, 43, 45, 47],
+  "perc2" --> [53, 55, 57, 59],
+  "perc3" --> [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
+  ]
+  where
+  (-->) = (,)
+
+cMinorKit :: Kit
+cMinorKit = Map.fromList [
+  "bass" --> [31,34,36,39,41,43,46,48],
+  "mid"  --> [51,53,55,58,60,63,65,67,70,72],
+  "high" --> [72,75,77,79,82,84,87,89],
+  "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
+  ]
+  where
+  (-->) = (,)
+
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
-myKit = makeChKit [("bells", 2, gamillionKit), ("kit", 1, repThatKit)]
+myKit = makeChKit [("kit", 1, repThatKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit)]
 
 main = do
     !conn <- openConn
