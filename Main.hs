@@ -8,6 +8,7 @@ import Control.Monad (filterM, forM_, when)
 import Data.Word (Word32)
 import Data.Foldable (toList)
 import Data.Semigroup ((<>))
+import Data.Maybe (maybeToList)
 import Control.Concurrent.MVar
 import Control.Monad.Random
 import Data.Ratio
@@ -97,42 +98,64 @@ mainThread chkit conn = do
 
 type Cloud = Rand StdGen
 
-makeRhythmRole :: ChKit -> String -> Rational -> Cloud Rhythm
-makeRhythmRole chkit role timing = do
-    numNotes <- uniform [3,3,4,4,4,4,5,6,6,6,6,8,8,9,10,12,15,16]
+makeRhythmRole :: ChKit -> String -> Rational -> Int -> Cloud Rhythm
+makeRhythmRole chkit role timing numNotes = do
     notes <- replicateM numNotes $
                 uncurry Note <$> uniform (chkit Map.! role) <*> (id =<< uniform [return 0, getRandomR (32,127)])
     len <- round . (/timing) . fromIntegral <$> getRandomR (30000,120000::Int)  -- timing = msec
     return $ Rhythm timing notes len role
 
-makeRhythm :: ChKit -> Rational -> Cloud Rhythm
-makeRhythm chkit timing = do
+makeRhythm :: ChKit -> Rational -> Int -> Cloud Rhythm
+makeRhythm chkit timing numNotes = do
     role <- uniform (Map.keys chkit)
-    makeRhythmRole chkit role timing
-
-intervals :: [Rational]
-intervals = [1/6, 1/4, 1/3, 1/2, 2/3, 1, 3/2, 2, 3, 4, 6]
-
+    makeRhythmRole chkit role timing numNotes
 
 choosePastRhythm :: State -> Cloud (Maybe Rhythm)
 choosePastRhythm state = do
-  let base = foldr gcdRat 0 . map rTiming . toList $ sActive state
-  let possible = filter (\p -> (base == 0 || (rTiming p / base) `elem` intervals)
-                            {- && rRole p `notElem` map rRole (toList (sActive state)) -})
+  let grid = foldr gcdRat 0 . map rTiming . toList $ sActive state
+  let period = foldr lcmRat 1 [ rTiming r * fromIntegral (length (rNotes r)) | r <- toList (sActive state) ]
+  let possible = filter (\p -> minimumGrid <= gcdRat grid (rTiming p)
+                            && lcmRat period (fromIntegral (length (rNotes p)) * rTiming p) <= maximumPeriod)
                 . toList $ sInactive state
   uniformMay possible
 
+minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
+minimumGrid = 1000/30  -- 30th of a second, maybe too short?
+maximumPeriod = 1000 * 10
+minimumNote = 1000/8
+maximumNote = 1000/2
+
+ratToInt :: Rational -> Maybe Integer
+ratToInt r | denominator r == 1 = Just (numerator r)
+           | otherwise = Nothing
+
+divisors :: Integer -> [Integer]
+divisors n = [ m | m <- [1..n], n `mod` m == 0 ]
 
 makeDerivedRhythm :: ChKit -> [Rhythm] -> Cloud (Maybe Rhythm)
-makeDerivedRhythm chkit [] = Just <$> makeRhythm chkit (1000/4)
+makeDerivedRhythm chkit [] = Just <$> (makeRhythm chkit (1000/4) =<< uniform [3,4,6,8])
 makeDerivedRhythm chkit rs = do
-    role <- uniformMay (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
-    let base = foldr1 gcdRat (map rTiming rs)
-    let timings = (base *) <$> intervals
-    let timings' = filter (\t -> 1000/8 < t && t < 1000) timings
-    case role of
-        Just r | not (null timings') -> fmap Just . makeRhythmRole chkit r =<< uniform timings'
-        _ -> return Nothing
+    role <- uniform (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
+    let grid = foldr1 gcdRat (map rTiming rs)
+    let newGrids = map (grid/) [1..fromIntegral (floor (grid/minimumGrid))]
+
+    let period = foldr1 lcmRat [ rTiming r * fromIntegral (length (rNotes r)) | r <- rs ]
+    let newPeriods = map (period*) [1..fromIntegral (floor (maximumPeriod/period))]
+
+    selection <- uniformMay $ do
+        g <- newGrids
+        p <- newPeriods
+        timing <- map (g*) [1..fromIntegral (floor (maximumNote/g))]
+        guard (minimumNote <= timing && timing <= maximumNote)
+
+        maxnotes <- maybeToList (ratToInt (p/timing))
+        notes <- divisors maxnotes
+        guard (3 <= notes && notes <= 16)
+        return (timing, fromIntegral notes)
+
+    case selection of
+      Just (timing, notes) -> Just <$> makeRhythmRole chkit role timing notes
+      Nothing -> return Nothing
 
 renderRhythm :: Rational -> Rhythm -> String
 renderRhythm timebase rhythm = 
@@ -145,6 +168,9 @@ renderRhythm timebase rhythm =
 
 gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
+
+lcmRat :: Rational -> Rational -> Rational
+lcmRat r r' = r*r' / gcdRat r r'
 
 repThatKit :: Kit
 repThatKit = Map.fromList [
