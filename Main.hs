@@ -9,6 +9,7 @@ import Data.Word (Word32)
 import Data.Foldable (toList)
 import Data.Semigroup ((<>))
 import Data.Maybe (maybeToList)
+import Data.List (foldl')
 import Control.Concurrent.MVar
 import Control.Monad.Random
 import Data.Ratio
@@ -36,6 +37,12 @@ data Rhythm = Rhythm {
     rLength :: Int,
     rRole :: String } 
     deriving (Eq, Ord)
+
+findPeriod :: (Foldable f) => f Rhythm -> Rational
+findPeriod = foldl' (\b a -> lcmRat b (fromIntegral (length (rNotes a)) * rTiming a)) 1
+
+findGrid :: (Foldable f) => f Rhythm -> Rational
+findGrid = foldl' (\b a -> gcdRat b (rTiming a)) 0
 
 type Kit = Map.Map String [Int]
 
@@ -78,9 +85,9 @@ mainThread chkit conn = do
         state <- readMVar stateVar
         clearScreen
         setCursorPosition 0 0
-        let timebase = foldr gcdRat 0 (map rTiming (toList (sActive state)))
+        let timebase = findGrid (sActive state)
+        let period = findPeriod (sActive state)
         putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
-        let period = foldr lcmRat 1 [ rTiming r * fromIntegral (length (rNotes r)) | r <- toList (sActive state) ]
         putStrLn $ "period: " ++ show (round period) ++ "ms"
 
         let padding = maximum [ length (rRole r) | r <- toList (sActive state) ]
@@ -92,7 +99,7 @@ mainThread chkit conn = do
         state <- readMVar stateVar
         -- Delay approximately 3 seconds per active rhythm,
         -- but always rounding up to the nearest period
-        let period = foldr lcmRat 1 [ rTiming r * fromIntegral (length (rNotes r)) | r <- toList (sActive state) ]
+        let period = findPeriod (sActive state)
         let target = 3000 * fromIntegral (length (sActive state) + 1)
         let delay = period * fromIntegral (ceiling (target / period))
         threadDelay (round (1000 * delay))
@@ -121,8 +128,8 @@ makeRhythm chkit timing numNotes = do
 
 choosePastRhythm :: State -> Cloud (Maybe Rhythm)
 choosePastRhythm state = do
-  let grid = foldr gcdRat 0 . map rTiming . toList $ sActive state
-  let period = foldr lcmRat 1 [ rTiming r * fromIntegral (length (rNotes r)) | r <- toList (sActive state) ]
+  let grid = findGrid (sActive state)
+  let period = findPeriod (sActive state)
   let possible = filter (\p -> minimumGrid <= gcdRat grid (rTiming p)
                             && lcmRat period (fromIntegral (length (rNotes p)) * rTiming p) <= maximumPeriod)
                 . toList $ sInactive state
@@ -145,10 +152,10 @@ makeDerivedRhythm :: ChKit -> [Rhythm] -> Cloud (Maybe Rhythm)
 makeDerivedRhythm chkit [] = Just <$> (makeRhythm chkit (1000/4) =<< uniform [3,4,6,8])
 makeDerivedRhythm chkit rs = do
     role <- uniform (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
-    let grid = foldr1 gcdRat (map rTiming rs)
+    let grid = findGrid rs
     let newGrids = map (grid/) [1..fromIntegral (floor (grid/minimumGrid))]
 
-    let period = foldr1 lcmRat [ rTiming r * fromIntegral (length (rNotes r)) | r <- rs ]
+    let period = findPeriod rs
     let newPeriods = map (period*) [1..fromIntegral (floor (maximumPeriod/period))]
 
     selection <- uniformMay $ do
@@ -183,7 +190,7 @@ gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
 
 lcmRat :: Rational -> Rational -> Rational
-lcmRat r r' = r*r' / gcdRat r r'
+lcmRat r r' = recip (gcdRat (recip r) (recip r'))
 
 repThatKit :: Kit
 repThatKit = Map.fromList [
