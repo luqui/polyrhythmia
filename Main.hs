@@ -89,8 +89,13 @@ mainThread chkit conn = do
         threadDelay 1000000
     forever $ do
         forkIO $ hand stateVar
-        delay <- evalRandIO $ getRandomR (5*10^6,15*10^6)
-        threadDelay delay
+        state <- readMVar stateVar
+        -- Delay approximately 3 seconds per active rhythm,
+        -- but always rounding up to the nearest period
+        let period = foldr lcmRat 1 [ rTiming r * fromIntegral (length (rNotes r)) | r <- toList (sActive state) ]
+        let target = 3000 * fromIntegral (length (sActive state) + 1)
+        let delay = period * fromIntegral (ceiling (target / period))
+        threadDelay (round (1000 * delay))
   where
   hand stateVar = do
     state <- readMVar stateVar
@@ -124,7 +129,7 @@ choosePastRhythm state = do
   uniformMay possible
 
 minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
-minimumGrid = 1000/30  -- 30th of a second, maybe too short?
+minimumGrid = 1000/16  -- 16th of a second
 maximumPeriod = 1000 * 10
 minimumNote = 1000/8
 maximumNote = 1000/2
