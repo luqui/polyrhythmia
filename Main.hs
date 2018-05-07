@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, TupleSections #-}
+{-# LANGUAGE BangPatterns, TupleSections, LambdaCase #-}
 
 import qualified System.MIDI as MIDI
 import qualified Data.Set as Set
@@ -18,6 +18,24 @@ import Data.List (delete, insert)
 import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
 
+-- TWEAKS --
+minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
+minimumGrid = 1000/16  -- 16th of a second
+maximumPeriod = 1000 * 10
+minimumNote = 1000/8
+maximumNote = 1000/2
+
+averageVoices :: Int
+averageVoices = 7
+
+maxModTimeSeconds, meanModTimeSeconds :: Double
+maxModTimeSeconds = 10
+meanModTimeSeconds = 5
+
+mutateProbability :: Double
+mutateProbability = 0.25
+
+-- END TWEAKS --
 
 openConn :: IO MIDI.Connection
 openConn = MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") . MIDI.getName) =<< MIDI.enumerateDestinations 
@@ -25,10 +43,9 @@ openConn = MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") .
 type Time = Rational  -- millisecs
 
 data State = State {
-  sActive :: Set.Set Rhythm,
+  sActive :: Map.Map Rhythm (TChan Signal),
   sInactive :: Set.Set Rhythm
  }
- deriving (Show)
 
 data Note = Note Int Int Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
@@ -57,6 +74,7 @@ type ChKit = Map.Map String [(Int,Int)] -- channel, note
 data Signal 
     = SigKill
     | SigMutate
+    deriving Show
 
 forBreak :: [a] -> (a -> IO Bool) -> IO [a]
 forBreak [] _ = return []
@@ -67,66 +85,95 @@ forBreak (x:xs) body = do
         else return xs
     
 
-rhythmThread :: MIDI.Connection -> Rhythm -> IO ()
-rhythmThread conn rhythm = do
-    let playNote vmod t (Note ch note vel dur) = do
-            waitTill conn t
-            let vel' = round (fromIntegral vel * vmod)
-            MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
-            waitTill conn (t + dur * rTiming rhythm)
-            MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
-
-    let playPhrase t0 = do
-            let times = [t0, t0 + rTiming rhythm ..]
-            let !ret = last (zipWith const times (rNotes rhythm ++ [error "too clever"]))
-            forM_ (zip times (rNotes rhythm)) $ \(t, note) -> playNote 1 t note
-            return ret
-    let fadePhrase t0 = do
-            let times = [t0, t0 + rTiming rhythm ..]
-            let velmod = [1,1-1/40,1/40]
-            forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod, t, note) -> 
-                playNote vmod t note
-             
-    let go t0 = do
-                nextt0 <- playPhrase t0
-                go nextt0
-             
+rhythmThread :: ChKit -> TVar State -> MIDI.Connection -> TChan Signal -> Rhythm -> IO Rhythm
+rhythmThread chkit stateVar conn chan rhythm0 = do
     now <- fromIntegral <$> MIDI.currentTime conn
-    let starttime = rTiming rhythm * fromIntegral (floor (now / rTiming rhythm))
-    go starttime
+    let starttime = quantize timing now
+    go rhythm0 starttime
+
+    where
+    timing = rTiming rhythm0
+
+    playNote vmod t (Note ch note vel dur) = do
+        waitTill conn t
+        let vel' = round (fromIntegral vel * vmod)
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
+        waitTill conn (t + dur * timing)
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+
+    playPhrase rhythm t0 = do
+        let times = [t0, t0 + timing ..]
+        let !ret = last (zipWith const times (rNotes rhythm ++ [error "too clever"]))
+        forM_ (zip times (rNotes rhythm)) $ \(t, note) -> playNote 1 t note
+        return ret
+
+    fadePhrase rhythm t0 = do
+        let times = [t0, t0 + timing ..]
+        let velmod = [1,1-1/40..1/40]
+        forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod, t, note) -> 
+            playNote vmod t note
+             
+    go rhythm t0 = do
+        sig <- atomically (tryReadTChan chan)
+        case sig of
+            Nothing -> playPhrase rhythm t0 >>= go rhythm
+            Just SigKill -> fadePhrase rhythm t0 >> return rhythm
+            Just SigMutate -> do
+                rhythm' <- evalRandIO $ mutate chkit rhythm
+                atomically . modifyTVar stateVar $ \s -> s {
+                    sActive = Map.insert rhythm' chan (Map.delete rhythm (sActive s))
+                  }
+                playPhrase rhythm' t0 >>= go rhythm'
+             
+quantize :: Rational -> Rational -> Rational
+quantize grid x = fromIntegral (floor (x / grid)) * grid
+
+mutate :: ChKit -> Rhythm -> Cloud Rhythm
+mutate chkit r = do
+    notes' <- mapM mutateNote (rNotes r)
+    return $ r { rNotes = notes' }
+    where
+    mutateNote note = do
+        p <- getRandomR (0,1 :: Double)
+        if p <= mutateProbability
+            then randomNote chkit (rRole r)
+            else return note
 
 waitTill :: MIDI.Connection -> Time -> IO ()
 waitTill conn target = do
     now <- fromIntegral <$> MIDI.currentTime conn
     threadDelay (floor (1000 * (target - now)))
 
-rhythmMain :: MIDI.Connection -> TVar State -> Rhythm -> IO ()
-rhythmMain conn stateVar rhythm = do
-    continue <- atomically $ do
+rhythmMain :: ChKit -> MIDI.Connection -> TVar State -> Rhythm -> IO ()
+rhythmMain chkit conn stateVar rhythm = do
+    maychan <- atomically $ do
         state <- readTVar stateVar
-        if rhythm `Set.member` sActive state then
-            return False
+        if rhythm `Map.member` sActive state then
+            return Nothing
         else do
-            writeTVar stateVar $ state { sActive = Set.insert rhythm (sActive state) }
-            return True
-    when continue $ do
-        rhythmThread conn rhythm
-        atomically . modifyTVar stateVar $ \s -> 
-            s { sActive = Set.delete rhythm (sActive s)
-              , sInactive = Set.insert rhythm (sInactive s)
-              }
+            chan <- newTChan
+            writeTVar stateVar $ state { sActive = Map.insert rhythm chan (sActive state) }
+            return (Just chan)
+    case maychan of
+        Nothing -> return ()
+        Just chan -> do
+            rhythm' <- rhythmThread chkit stateVar conn chan rhythm
+            atomically . modifyTVar stateVar $ \s -> 
+                s { sActive = Map.delete rhythm' (sActive s)
+                  , sInactive = Set.insert rhythm' (sInactive s)
+                  }
 
 renderState :: State -> IO ()
 renderState state = do
     clearScreen
     setCursorPosition 0 0
-    let timebase = findGrid (sActive state)
-    let period = findPeriod (sActive state)
+    let timebase = findGrid (Map.keys (sActive state))
+    let period = findPeriod (Map.keys (sActive state))
     putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
     putStrLn $ "period: " ++ show (round period) ++ "ms"
 
-    let padding = maximum [ length (rRole r) | r <- toList (sActive state) ]
-    mapM_ (putStrLn . renderRhythm timebase padding) (reverse (toList (sActive state)))
+    let padding = maximum [ length (rRole r) | r <- Map.keys (sActive state) ]
+    mapM_ (putStrLn . renderRhythm timebase padding) (Map.keys (sActive state))
 
     hFlush stdout
 
@@ -142,39 +189,59 @@ renderRhythm timebase padding rhythm =
                               | otherwise = "X"
     padString p s = take p (s ++ repeat ' ')
 
-
 mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
-    stateVar <- newTVarIO $ State { sActive = Set.empty, sInactive = Set.empty }
+    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Set.empty }
     forkIO . forever $ do
         renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
     forever $ do
-        forkIO $ hand stateVar
+        makeChange stateVar
         state <- atomically (readTVar stateVar)  -- XXX race condition, new rhythm could change period
-        -- Delay approximately 3 seconds per active rhythm,
-        -- but always rounding up to the nearest period
-        let period = findPeriod (sActive state)
-        let target = 3000 * fromIntegral (length (sActive state) + 1)
-        let delay = period * fromIntegral (ceiling (target / period))
-        threadDelay (round (1000 * delay))
+        -- exp distribution
+        param <- evalRandIO $ getRandomR (0, 1 :: Double)
+        let delay = min (maxModTimeSeconds*10^6) (-log param * meanModTimeSeconds*10^6) 
+        threadDelay (floor delay)
   where
-  hand stateVar = do
+  makeChange stateVar = do
+    voices <- fromIntegral . length . sActive <$> atomically (readTVar stateVar)
+    id =<< evalRandIO (weighted [ 
+        (newRhythm stateVar, fromIntegral averageVoices), 
+        (sendRandSignal SigKill stateVar, voices), 
+        (sendRandSignal SigMutate stateVar, voices) ])
+
+  newRhythm stateVar = void . forkIO $ do
+    putStrLn $ "Creating rhythm"
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
-    r <- evalRandIO $ do
-        pastr <- makeDerivedRhythm chkit (toList (sActive state))
+    ret <- evalRandIO $ do
+        pastr <- fmap (state,) <$> makeDerivedRhythm chkit (Map.keys (sActive state))
         newr <- choosePastRhythm state
         uniform [pastr `mplus` newr, newr `mplus` pastr]
-    maybe (return ()) (rhythmMain conn stateVar) r
+    case ret of
+        Nothing -> return()
+        Just (state', r) -> do
+            atomically (writeTVar stateVar state')
+            rhythmMain chkit conn stateVar r
+
+  sendRandSignal sig stateVar = do
+    putStrLn $ "Sending " ++ show sig
+    state <- atomically (readTVar stateVar)
+    evalRandIO (uniformMay (sActive state)) >>= \case
+        Nothing -> return ()
+        Just chan -> atomically $ writeTChan chan sig
+
 
 type Cloud = Rand StdGen
 
+randomNote :: ChKit -> String -> Cloud Note
+randomNote chkit role =
+     uncurry Note <$> uniform (chkit Map.! role) 
+                  <*> (id =<< uniform [return 0, getRandomR (32,127)]) 
+                  <*> uniform [1/10, 1/2, 9/10, 1]
+
 makeRhythmRole :: ChKit -> String -> Rational -> Int -> Cloud Rhythm
 makeRhythmRole chkit role timing numNotes = do
-    notes <- replicateM numNotes $
-                uncurry Note <$> uniform (chkit Map.! role) 
-                             <*> (id =<< uniform [return 0, getRandomR (32,127)]) 
-                             <*> uniform [1/10, 1/2, 9/10, 1]
+    notes <- replicateM numNotes (randomNote chkit role)
     return $ Rhythm timing role notes
 
 makeRhythm :: ChKit -> Rational -> Int -> Cloud Rhythm
@@ -190,15 +257,10 @@ admits rs = \cand -> and [ minimumGrid <= gcdRat grid (rTiming cand)
     grid = findGrid rs
     period = findPeriod rs
 
-choosePastRhythm :: State -> Cloud (Maybe Rhythm)
-choosePastRhythm state =
-    uniformMay $ filter (sActive state `admits`) . toList $ sInactive state
-
-minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
-minimumGrid = 1000/16  -- 16th of a second
-maximumPeriod = 1000 * 10
-minimumNote = 1000/8
-maximumNote = 1000/2
+choosePastRhythm :: State -> Cloud (Maybe (State, Rhythm))
+choosePastRhythm state = do
+    choice <- uniformMay $ filter (Map.keys (sActive state) `admits`) . toList $ sInactive state
+    return $ fmap (\r -> (state { sInactive = Set.delete r (sInactive state) }, r)) choice
 
 ratToInt :: Rational -> Maybe Integer
 ratToInt r | denominator r == 1 = Just (numerator r)
@@ -257,10 +319,11 @@ gamillionKit = Map.fromList [
   --"kick " --> [36, 37, 48, 49, 60, 61],
   --"snare" --> [38, 39, 40, 50, 51, 52, 62, 63, 64],
   --"hat  " --> [42, 44, 46, 54, 56, 58, 66, 68, 70],
-  "bell1" --> [41, 43, 45, 47],
-  "bell2" --> [53, 55, 57, 59],
-  "bell3" --> [65, 67, 69, 71],
-  "bell4" --> [72..83]
+  --"bell1" --> [41, 43, 45, 47],
+  --"bell2" --> [53, 55, 57, 59],
+  --"bell3" --> [65, 67, 69, 71],
+  --"bell4" --> [72..83]
+  "bell" --> ([41,43,45,47, 53,55,57,59, 65,67,69,71] ++ [72..83])
   ]
 
 sAndBKit :: Kit
@@ -289,7 +352,7 @@ cMinorBassKit = Map.fromList [
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
-myKit = makeChKit [("kit", 1, repThatKit), {-("elec", 3, sAndBKit),-} ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
+myKit = makeChKit [("kit", 1, repThatKit), ("bell", 2, gamillionKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
 
 main = do
     !conn <- openConn
