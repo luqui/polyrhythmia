@@ -20,7 +20,7 @@ import Data.Ratio
 import Data.List (delete, insert)
 import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
-import System.Posix.Signals (installHandler, Handler(..), sigINT)
+import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raiseSignal)
 
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
@@ -375,8 +375,14 @@ timeToDie = unsafePerformIO $ newIORef False
 main = do
     !conn <- openConn
     MIDI.start conn
-    installHandler sigINT (Catch $ writeIORef timeToDie True) 
+    installHandler sigINT (Catch onInt)
       Nothing
     mainThread myKit conn
+    where
+    onInt = do
+        dietime <- readIORef timeToDie
+        if dietime
+            then raiseSignal sigTERM
+            else writeIORef timeToDie True
 
 forkIO_ a = forkIO a >> return ()
