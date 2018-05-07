@@ -29,14 +29,13 @@ data State = State {
  }
  deriving (Show)
 
-data Note = Note Int Int Int  -- ch note vel
+data Note = Note Int Int Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
     rTiming :: Rational,
-    rNotes :: [Note],
-    rLength :: Int,
-    rRole :: String } 
+    rRole :: String,
+    rNotes :: [Note] } 
     deriving (Eq, Ord, Show)
 
 timeLength :: Rhythm -> Rational
@@ -54,18 +53,46 @@ type Kit = Map.Map String [Int]
 
 type ChKit = Map.Map String [(Int,Int)] -- channel, note
 
+data Signal 
+    = SigKill
+    | SigMutate
+
+forBreak :: [a] -> (a -> IO Bool) -> IO [a]
+forBreak [] _ = return []
+forBreak (x:xs) body = do
+    r <- body x
+    if r
+        then forBreak xs body
+        else return xs
+    
+
 rhythmThread :: MIDI.Connection -> Rhythm -> IO ()
 rhythmThread conn rhythm = do
+    let playNote vmod t (Note ch note vel dur) = do
+            waitTill conn t
+            let vel' = round (fromIntegral vel * vmod)
+            MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
+            waitTill conn (t + dur * rTiming rhythm)
+            MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+
+    let playPhrase t0 = do
+            let times = [t0, t0 + rTiming rhythm ..]
+            let !ret = last (zipWith const times (rNotes rhythm ++ [error "too clever"]))
+            forM_ (zip times (rNotes rhythm)) $ \(t, note) -> playNote 1 t note
+            return ret
+    let fadePhrase t0 = do
+            let times = [t0, t0 + rTiming rhythm ..]
+            let velmod = [1,1-1/40,1/40]
+            forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod, t, note) -> 
+                playNote vmod t note
+             
+    let go t0 = do
+                nextt0 <- playPhrase t0
+                go nextt0
+             
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = rTiming rhythm * fromIntegral (floor (now / rTiming rhythm))
-    let times = take (rLength rhythm) [starttime, starttime + rTiming rhythm ..]
-    let velmod = replicate (rLength rhythm - 20) 1 ++ [1,1-1/20..1/20]
-    forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod,t,Note ch note vel) -> do
-        waitTill conn t
-        let vel' = round (fromIntegral vel * vmod)
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
-        waitTill conn (t + rTiming rhythm / 2)
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+    go starttime
 
 waitTill :: MIDI.Connection -> Time -> IO ()
 waitTill conn target = do
@@ -105,9 +132,9 @@ renderRhythm timebase padding rhythm =
       ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
     where
     spacing = floor (rTiming rhythm / timebase)
-    renderNote (Note _ _ v) | v == 0    = "."
-                            | v < 75    = "x"
-                            | otherwise = "X"
+    renderNote (Note _ _ v _) | v == 0    = "."
+                              | v < 75    = "x"
+                              | otherwise = "X"
     padString p s = take p (s ++ repeat ' ')
 
 
@@ -140,9 +167,10 @@ type Cloud = Rand StdGen
 makeRhythmRole :: ChKit -> String -> Rational -> Int -> Cloud Rhythm
 makeRhythmRole chkit role timing numNotes = do
     notes <- replicateM numNotes $
-                uncurry Note <$> uniform (chkit Map.! role) <*> (id =<< uniform [return 0, getRandomR (32,127)])
-    len <- round . (/timing) . fromIntegral <$> getRandomR (30000,120000::Int)  -- timing = msec
-    return $ Rhythm timing notes len role
+                uncurry Note <$> uniform (chkit Map.! role) 
+                             <*> (id =<< uniform [return 0, getRandomR (32,127)]) 
+                             <*> uniform [1/10, 1/2, 9/10, 1]
+    return $ Rhythm timing role notes
 
 makeRhythm :: ChKit -> Rational -> Int -> Cloud Rhythm
 makeRhythm chkit timing numNotes = do
@@ -215,7 +243,7 @@ repThatKit = Map.fromList [
   "kick " --> [48, 49, 60, 61, 72, 73],
   "snare" --> [50, 51, 52, 62, 63, 64, 74, 75, 76],
   "hat  " --> [42, 46, 54, 56, 58, 66, 68, 70, 78, 80, 82],
-  "ride " --> [59, 83],
+  --"ride " --> [59, 83],
   "perc " --> [43, 53, 55, 65, 67, 77, 79]
   ]
 
@@ -256,7 +284,7 @@ cMinorBassKit = Map.fromList [
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
-myKit = makeChKit [("kit", 1, repThatKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
+myKit = makeChKit [("kit", 1, repThatKit), {-("elec", 3, sAndBKit),-} ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
 
 main = do
     !conn <- openConn
