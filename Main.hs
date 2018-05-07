@@ -38,8 +38,11 @@ data Rhythm = Rhythm {
     rRole :: String } 
     deriving (Eq, Ord)
 
+timeLength :: Rhythm -> Rational
+timeLength r = fromIntegral (length (rNotes r)) * rTiming r
+
 findPeriod :: (Foldable f) => f Rhythm -> Rational
-findPeriod = foldl' (\b a -> lcmRat b (fromIntegral (length (rNotes a)) * rTiming a)) 1
+findPeriod = foldl' (\b a -> lcmRat b (timeLength a)) 1
 
 findGrid :: (Foldable f) => f Rhythm -> Rational
 findGrid = foldl' (\b a -> gcdRat b (rTiming a)) 0
@@ -78,21 +81,37 @@ rhythmMain conn stateVar rhythm = do
 
 modMVar v = modifyMVar_ v . (return .)
 
+renderState :: State -> IO ()
+renderState state = do
+    clearScreen
+    setCursorPosition 0 0
+    let timebase = findGrid (sActive state)
+    let period = findPeriod (sActive state)
+    putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
+    putStrLn $ "period: " ++ show (round period) ++ "ms"
+
+    let padding = maximum [ length (rRole r) | r <- toList (sActive state) ]
+    mapM_ (putStrLn . renderRhythm timebase padding) (reverse (toList (sActive state)))
+    hFlush stdout
+
+
+renderRhythm :: Rational -> Int -> Rhythm -> String
+renderRhythm timebase padding rhythm = 
+    padString padding (rRole rhythm) 
+      ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
+    where
+    spacing = floor (rTiming rhythm / timebase)
+    renderNote (Note _ _ v) | v == 0    = "."
+                            | v < 75    = "x"
+                            | otherwise = "X"
+    padString p s = take p (s ++ repeat ' ')
+
+
 mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
     stateVar <- newMVar $ State { sActive = Set.empty, sInactive = Set.empty }
     forkIO . forever $ do
-        state <- readMVar stateVar
-        clearScreen
-        setCursorPosition 0 0
-        let timebase = findGrid (sActive state)
-        let period = findPeriod (sActive state)
-        putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
-        putStrLn $ "period: " ++ show (round period) ++ "ms"
-
-        let padding = maximum [ length (rRole r) | r <- toList (sActive state) ]
-        mapM_ (putStrLn . renderRhythm timebase padding) (reverse (toList (sActive state)))
-        hFlush stdout
+        renderState =<< readMVar stateVar
         threadDelay 1000000
     forever $ do
         forkIO $ hand stateVar
@@ -126,14 +145,17 @@ makeRhythm chkit timing numNotes = do
     role <- uniform (Map.keys chkit)
     makeRhythmRole chkit role timing numNotes
 
+admits :: (Foldable f) => f Rhythm -> Rhythm -> Bool
+admits rs = \cand -> and [ minimumGrid <= gcdRat grid (rTiming cand)
+                       , lcmRat period (timeLength cand) <= maximumPeriod
+                       ]
+    where
+    grid = findGrid rs
+    period = findPeriod rs
+
 choosePastRhythm :: State -> Cloud (Maybe Rhythm)
-choosePastRhythm state = do
-  let grid = findGrid (sActive state)
-  let period = findPeriod (sActive state)
-  let possible = filter (\p -> minimumGrid <= gcdRat grid (rTiming p)
-                            && lcmRat period (fromIntegral (length (rNotes p)) * rTiming p) <= maximumPeriod)
-                . toList $ sInactive state
-  uniformMay possible
+choosePastRhythm state =
+    uniformMay $ filter (sActive state `admits`) . toList $ sInactive state
 
 minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
 minimumGrid = 1000/16  -- 16th of a second
@@ -149,7 +171,10 @@ divisors :: Integer -> [Integer]
 divisors n = [ m | m <- [1..n], n `mod` m == 0 ]
 
 makeDerivedRhythm :: ChKit -> [Rhythm] -> Cloud (Maybe Rhythm)
-makeDerivedRhythm chkit [] = Just <$> (makeRhythm chkit (1000/4) =<< uniform [3,4,6,8])
+makeDerivedRhythm chkit [] = do
+    timing <- (2000 %) <$> getRandomR (4,12)
+    notes  <- uniform [3..8]
+    Just <$> makeRhythm chkit timing notes
 makeDerivedRhythm chkit rs = do
     role <- uniform (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
     let grid = findGrid rs
@@ -173,24 +198,13 @@ makeDerivedRhythm chkit rs = do
       Just (timing, notes) -> Just <$> makeRhythmRole chkit role timing notes
       Nothing -> return Nothing
 
-renderRhythm :: Rational -> Int -> Rhythm -> String
-renderRhythm timebase padding rhythm = 
-    padString padding (rRole rhythm) 
-      ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
-    where
-    spacing = floor (rTiming rhythm / timebase)
-    renderNote (Note _ _ v) | v == 0    = "."
-                            | v < 75    = "x"
-                            | otherwise = "X"
-
-padString :: Int -> String -> String
-padString p s = take p (s ++ repeat ' ')
-
 gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
 
 lcmRat :: Rational -> Rational -> Rational
 lcmRat r r' = recip (gcdRat (recip r) (recip r'))
+
+(-->) = (,)
 
 repThatKit :: Kit
 repThatKit = Map.fromList [
@@ -200,8 +214,6 @@ repThatKit = Map.fromList [
   "ride " --> [59, 83],
   "perc " --> [43, 53, 55, 65, 67, 77, 79]
   ]
-  where
-  (-->) = (,)
 
 gamillionKit :: Kit
 gamillionKit = Map.fromList [
@@ -213,8 +225,6 @@ gamillionKit = Map.fromList [
   "bell3" --> [65, 67, 69, 71],
   "bell4" --> [72..83]
   ]
-  where
-  (-->) = (,)
 
 sAndBKit :: Kit
 sAndBKit = Map.fromList [
@@ -225,23 +235,24 @@ sAndBKit = Map.fromList [
   "perc2" --> [53, 55, 57, 59],
   "perc3" --> [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
   ]
-  where
-  (-->) = (,)
 
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
-  "bass" --> [31,34,36,39,41,43,46,48],
+  -- "bass" --> [31,34,36,39,41,43,46,48],
   "mid"  --> [51,53,55,58,60,63,65,67,70,72],
   "high" --> [72,75,77,79,82,84,87,89],
   "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
   ]
-  where
-  (-->) = (,)
+
+cMinorBassKit :: Kit
+cMinorBassKit = Map.fromList [
+  "bass" --> [31,34,36,39,41,43,46,48]
+  ]
 
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
-myKit = makeChKit [("kit", 1, repThatKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit)]
+myKit = makeChKit [("kit", 1, repThatKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
 
 main = do
     !conn <- openConn
