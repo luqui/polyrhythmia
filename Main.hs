@@ -6,17 +6,21 @@ import qualified Data.Map as Map
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Control.Concurrent.STM
+import Control.Applicative
 import Control.Concurrent.STM.TVar
 import Data.Word (Word32)
 import Data.Foldable (toList)
 import Data.Semigroup ((<>))
 import Data.Maybe (maybeToList)
+import Data.IORef
+import System.IO.Unsafe (unsafePerformIO)
 import Data.List (foldl1')
 import Control.Monad.Random
 import Data.Ratio
 import Data.List (delete, insert)
 import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
+import System.Posix.Signals (installHandler, Handler(..), sigINT)
 
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
@@ -30,7 +34,7 @@ averageVoices = 7
 
 maxModTimeSeconds, meanModTimeSeconds :: Double
 maxModTimeSeconds = 10
-meanModTimeSeconds = 5
+meanModTimeSeconds = 3
 
 mutateProbability :: Double
 mutateProbability = 0.25
@@ -175,6 +179,9 @@ renderState state = do
     let padding = maximum [ length (rRole r) | r <- Map.keys (sActive state) ]
     mapM_ (putStrLn . renderRhythm timebase padding) (Map.keys (sActive state))
 
+    dietime <- readIORef timeToDie
+    when dietime $ putStrLn "Winding down..."
+
     hFlush stdout
 
 
@@ -189,13 +196,19 @@ renderRhythm timebase padding rhythm =
                               | otherwise = "X"
     padString p s = take p (s ++ repeat ' ')
 
+whileM :: (Monad m) => m Bool -> m () -> m ()
+whileM condm action = do
+    r <- condm
+    when r (action >> whileM condm action)
+
 mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
     stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Set.empty }
     forkIO . forever $ do
         renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
-    forever $ do
+    whileM (liftA2 (||) (not <$> readIORef timeToDie) 
+                        (not . null . sActive <$> atomically (readTVar stateVar))) $ do
         makeChange stateVar
         state <- atomically (readTVar stateVar)  -- XXX race condition, new rhythm could change period
         -- exp distribution
@@ -210,8 +223,11 @@ mainThread chkit conn = do
         (sendRandSignal SigKill stateVar, voices), 
         (sendRandSignal SigMutate stateVar, voices) ])
 
-  newRhythm stateVar = void . forkIO $ do
-    putStrLn $ "Creating rhythm"
+  newRhythm stateVar = do
+    dietime <- readIORef timeToDie
+    if dietime then sendRandSignal SigKill stateVar else newRhythmReal stateVar
+
+  newRhythmReal stateVar = void . forkIO $ do
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
     ret <- evalRandIO $ do
         pastr <- fmap (state,) <$> makeDerivedRhythm chkit (Map.keys (sActive state))
@@ -224,7 +240,6 @@ mainThread chkit conn = do
             rhythmMain chkit conn stateVar r
 
   sendRandSignal sig stateVar = do
-    putStrLn $ "Sending " ++ show sig
     state <- atomically (readTVar stateVar)
     evalRandIO (uniformMay (sActive state)) >>= \case
         Nothing -> return ()
@@ -354,9 +369,14 @@ makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.ma
 
 myKit = makeChKit [("kit", 1, repThatKit), ("bell", 2, gamillionKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
 
+timeToDie :: IORef Bool
+timeToDie = unsafePerformIO $ newIORef False
+
 main = do
     !conn <- openConn
     MIDI.start conn
+    installHandler sigINT (Catch $ writeIORef timeToDie True) 
+      Nothing
     mainThread myKit conn
 
 forkIO_ a = forkIO a >> return ()
