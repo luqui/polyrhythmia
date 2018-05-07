@@ -5,12 +5,13 @@ import qualified Data.Set as Set
 import qualified Data.Map as Map
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
+import Control.Concurrent.STM
+import Control.Concurrent.STM.TVar
 import Data.Word (Word32)
 import Data.Foldable (toList)
 import Data.Semigroup ((<>))
 import Data.Maybe (maybeToList)
 import Data.List (foldl1')
-import Control.Concurrent.MVar
 import Control.Monad.Random
 import Data.Ratio
 import Data.List (delete, insert)
@@ -99,17 +100,21 @@ waitTill conn target = do
     now <- fromIntegral <$> MIDI.currentTime conn
     threadDelay (floor (1000 * (target - now)))
 
-rhythmMain :: MIDI.Connection -> MVar State -> Rhythm -> IO ()
+rhythmMain :: MIDI.Connection -> TVar State -> Rhythm -> IO ()
 rhythmMain conn stateVar rhythm = do
-    state <- takeMVar stateVar
-    if rhythm `Set.member` sActive state then putMVar stateVar state else do
-    putMVar stateVar $ state { sActive = Set.insert rhythm (sActive state) }
-    rhythmThread conn rhythm
-    modMVar stateVar $ \s -> s { sActive = Set.delete rhythm (sActive s)
-                               , sInactive = Set.insert rhythm (sInactive s)
-                             }
-
-modMVar v = modifyMVar_ v . (return .)
+    continue <- atomically $ do
+        state <- readTVar stateVar
+        if rhythm `Set.member` sActive state then
+            return False
+        else do
+            writeTVar stateVar $ state { sActive = Set.insert rhythm (sActive state) }
+            return True
+    when continue $ do
+        rhythmThread conn rhythm
+        atomically . modifyTVar stateVar $ \s -> 
+            s { sActive = Set.delete rhythm (sActive s)
+              , sInactive = Set.insert rhythm (sInactive s)
+              }
 
 renderState :: State -> IO ()
 renderState state = do
@@ -140,13 +145,13 @@ renderRhythm timebase padding rhythm =
 
 mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
-    stateVar <- newMVar $ State { sActive = Set.empty, sInactive = Set.empty }
+    stateVar <- newTVarIO $ State { sActive = Set.empty, sInactive = Set.empty }
     forkIO . forever $ do
-        renderState =<< readMVar stateVar
+        renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
     forever $ do
         forkIO $ hand stateVar
-        state <- readMVar stateVar
+        state <- atomically (readTVar stateVar)  -- XXX race condition, new rhythm could change period
         -- Delay approximately 3 seconds per active rhythm,
         -- but always rounding up to the nearest period
         let period = findPeriod (sActive state)
@@ -155,7 +160,7 @@ mainThread chkit conn = do
         threadDelay (round (1000 * delay))
   where
   hand stateVar = do
-    state <- readMVar stateVar
+    state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
     r <- evalRandIO $ do
         pastr <- makeDerivedRhythm chkit (toList (sActive state))
         newr <- choosePastRhythm state
