@@ -9,7 +9,7 @@ import Data.Word (Word32)
 import Data.Foldable (toList)
 import Data.Semigroup ((<>))
 import Data.Maybe (maybeToList)
-import Data.List (foldl')
+import Data.List (foldl1')
 import Control.Concurrent.MVar
 import Control.Monad.Random
 import Data.Ratio
@@ -27,25 +27,28 @@ data State = State {
   sActive :: Set.Set Rhythm,
   sInactive :: Set.Set Rhythm
  }
+ deriving (Show)
 
 data Note = Note Int Int Int  -- ch note vel
-    deriving (Eq, Ord)
+    deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
     rTiming :: Rational,
     rNotes :: [Note],
     rLength :: Int,
     rRole :: String } 
-    deriving (Eq, Ord)
+    deriving (Eq, Ord, Show)
 
 timeLength :: Rhythm -> Rational
 timeLength r = fromIntegral (length (rNotes r)) * rTiming r
 
 findPeriod :: (Foldable f) => f Rhythm -> Rational
-findPeriod = foldl' (\b a -> lcmRat b (timeLength a)) 1
+findPeriod f | null f = 1
+             | otherwise = foldl1' lcmRat . map timeLength . toList $ f
 
 findGrid :: (Foldable f) => f Rhythm -> Rational
-findGrid = foldl' (\b a -> gcdRat b (rTiming a)) 0
+findGrid f | null f = 0
+           | otherwise = foldl1' gcdRat . map rTiming . toList $ f
 
 type Kit = Map.Map String [Int]
 
@@ -92,6 +95,7 @@ renderState state = do
 
     let padding = maximum [ length (rRole r) | r <- toList (sActive state) ]
     mapM_ (putStrLn . renderRhythm timebase padding) (reverse (toList (sActive state)))
+
     hFlush stdout
 
 
