@@ -48,7 +48,7 @@ type Time = Rational  -- millisecs
 
 data State = State {
   sActive :: Map.Map Rhythm (TChan Signal),
-  sInactive :: Set.Set Rhythm
+  sInactive :: Map.Map Rhythm Time  -- value is timestamp when it was last killed
  }
 
 data Note = Note Int Int Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
@@ -150,21 +150,26 @@ waitTill conn target = do
 
 rhythmMain :: ChKit -> MIDI.Connection -> TVar State -> Rhythm -> IO ()
 rhythmMain chkit conn stateVar rhythm = do
+    now <- fromIntegral <$> MIDI.currentTime conn
     maychan <- atomically $ do
         state <- readTVar stateVar
         if rhythm `Map.member` sActive state then
             return Nothing
         else do
             chan <- newTChan
-            writeTVar stateVar $ state { sActive = Map.insert rhythm chan (sActive state) }
+            -- Insert into the inactive set immediately, so that if the rhythm mutates,
+            -- we can ressurect the original, which is more musically satisfying.
+            writeTVar stateVar $ state { sActive = Map.insert rhythm chan (sActive state)
+                                       , sInactive = Map.insert rhythm now (sInactive state) }
             return (Just chan)
     case maychan of
         Nothing -> return ()
         Just chan -> do
+            now <- fromIntegral <$> MIDI.currentTime conn
             rhythm' <- rhythmThread chkit stateVar conn chan rhythm
             atomically . modifyTVar stateVar $ \s -> 
                 s { sActive = Map.delete rhythm' (sActive s)
-                  , sInactive = Set.insert rhythm' (sInactive s)
+                  , sInactive = Map.insert rhythm' now (sInactive s)
                   }
 
 renderState :: State -> IO ()
@@ -203,7 +208,7 @@ whileM condm action = do
 
 mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
-    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Set.empty }
+    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty }
     forkIO . forever $ do
         renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
@@ -229,9 +234,10 @@ mainThread chkit conn = do
 
   newRhythmReal stateVar = void . forkIO $ do
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
+    now <- fromIntegral <$> MIDI.currentTime conn
     ret <- evalRandIO $ do
         pastr <- fmap (state,) <$> makeDerivedRhythm chkit (Map.keys (sActive state))
-        newr <- choosePastRhythm state
+        newr <- choosePastRhythm state now
         uniform [pastr `mplus` newr, newr `mplus` pastr]
     case ret of
         Nothing -> return()
@@ -272,10 +278,13 @@ admits rs = \cand -> and [ minimumGrid <= gcdRat grid (rTiming cand)
     grid = findGrid rs
     period = findPeriod rs
 
-choosePastRhythm :: State -> Cloud (Maybe (State, Rhythm))
-choosePastRhythm state = do
-    choice <- uniformMay $ filter (Map.keys (sActive state) `admits`) . toList $ sInactive state
-    return $ fmap (\r -> (state { sInactive = Set.delete r (sInactive state) }, r)) choice
+choosePastRhythm :: State -> Time -> Cloud (Maybe (State, Rhythm))
+choosePastRhythm state now = do
+    choice <- weightedMay $ do
+        (rhythm, time) <- Map.assocs (sInactive state)
+        guard (Map.keys (sActive state) `admits` rhythm)
+        return (rhythm, now - time)
+    return $ fmap (state,) choice
 
 ratToInt :: Rational -> Maybe Integer
 ratToInt r | denominator r == 1 = Just (numerator r)
