@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE BangPatterns, TupleSections, LambdaCase #-}
 
 import qualified System.MIDI as MIDI
@@ -230,7 +231,7 @@ mainThread chkit conn = do
     -- Chord change thread
     forkIO . forever $ do
         shift <- evalRandIO $ getRandomR (0,11)
-        atomically . modifyTVar stateVar $ \s -> State { sKey = Scale.transposeChr shift (sKey s) }
+        atomically . modifyTVar stateVar $ \s -> s { sKey = Scale.transposeChr shift (sKey s) }
         delay <- evalRandIO $ getRandomR (3*10^6,6*10^6)
         threadDelay delay
         

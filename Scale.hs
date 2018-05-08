@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wall #-}
+
 module Scale (
     MIDINote, Scale, Range,
     apply,
