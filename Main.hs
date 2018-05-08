@@ -1,24 +1,19 @@
-{-# OPTIONS_GHC -Wall #-}
+{-# OPTIONS_GHC -Wall -Wno-type-defaults #-}
 {-# LANGUAGE BangPatterns, TupleSections, LambdaCase #-}
 
 import qualified System.MIDI as MIDI
-import qualified Data.Set as Set
 import qualified Data.Map as Map
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Control.Concurrent.STM
 import Control.Applicative
-import Control.Concurrent.STM.TVar
-import Data.Word (Word32)
 import Data.Foldable (toList)
-import Data.Semigroup ((<>))
 import Data.Maybe (maybeToList)
 import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
 import Data.List (foldl1')
 import Control.Monad.Random
 import Data.Ratio
-import Data.List (delete, insert)
 import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
 import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raiseSignal)
@@ -88,15 +83,6 @@ data Signal
     | SigMutate
     deriving Show
 
-forBreak :: [a] -> (a -> IO Bool) -> IO [a]
-forBreak [] _ = return []
-forBreak (x:xs) body = do
-    r <- body x
-    if r
-        then forBreak xs body
-        else return xs
-    
-
 rhythmThread :: ChKit -> TVar State -> MIDI.Connection -> TChan Signal -> Rhythm -> IO Rhythm
 rhythmThread chkit stateVar conn chan rhythm0 = do
     now <- fromIntegral <$> MIDI.currentTime conn
@@ -106,6 +92,7 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
     where
     timing = rTiming rhythm0
 
+    playNote :: Double -> Time -> Note -> IO ()
     playNote vmod t (Note ch pitch vel dur) = do
         waitTill conn t
         let vel' = round (fromIntegral vel * vmod)
@@ -179,7 +166,6 @@ rhythmMain chkit conn stateVar rhythm = do
     case maychan of
         Nothing -> return ()
         Just chan -> do
-            now <- fromIntegral <$> MIDI.currentTime conn
             rhythm' <- rhythmThread chkit stateVar conn chan rhythm
             atomically . modifyTVar stateVar $ \s -> 
                 s { sActive = Map.delete rhythm' (sActive s)
@@ -224,12 +210,12 @@ mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
     stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Scale.cMinorPentatonic }
     -- Display thread
-    forkIO . forever $ do
+    void . forkIO . forever $ do
         renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
     
     -- Chord change thread
-    forkIO . forever $ do
+    void . forkIO . forever $ do
         shift <- evalRandIO $ getRandomR (0,11)
         atomically . modifyTVar stateVar $ \s -> s { sKey = Scale.transposeChr shift (sKey s) }
         delay <- evalRandIO $ getRandomR (3*10^6,6*10^6)
@@ -239,7 +225,6 @@ mainThread chkit conn = do
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
         makeChange stateVar
-        state <- atomically (readTVar stateVar)  -- XXX race condition, new rhythm could change period
         -- exp distribution
         param <- evalRandIO $ getRandomR (0, 1 :: Double)
         let delay = min (maxModTimeSeconds*10^6) (-log param * meanModTimeSeconds*10^6) 
@@ -351,8 +336,10 @@ gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominato
 lcmRat :: Rational -> Rational -> Rational
 lcmRat r r' = recip (gcdRat (recip r) (recip r'))
 
+(-->) :: a -> b -> (a,b)
 (-->) = (,)
 
+{-
 repThatKit :: Kit
 repThatKit = Map.fromList [
   "kick " --> perc [48, 49, 60, 61, 72, 73],
@@ -364,7 +351,6 @@ repThatKit = Map.fromList [
   where
   perc = map Percussion
 
-{-
 gamillionKit :: Kit
 gamillionKit = Map.fromList [
   --"kick " --> [36, 37, 48, 49, 60, 61],
@@ -406,6 +392,7 @@ cMinorBassKit = Map.fromList [
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
+myKit :: ChKit
 myKit = makeChKit [
     --  ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
@@ -417,11 +404,11 @@ myKit = makeChKit [
 timeToDie :: IORef Bool
 timeToDie = unsafePerformIO $ newIORef False
 
+main :: IO ()
 main = do
     !conn <- openConn
     MIDI.start conn
-    installHandler sigINT (Catch onInt)
-      Nothing
+    void $ installHandler sigINT (Catch onInt) Nothing
     mainThread myKit conn
     where
     onInt = do
@@ -429,5 +416,3 @@ main = do
         if dietime
             then raiseSignal sigTERM
             else writeIORef timeToDie True
-
-forkIO_ a = forkIO a >> return ()

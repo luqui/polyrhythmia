@@ -29,6 +29,9 @@ apply scale (lo,hi) deg = octaveClamp (lo,hi) (root + (wrapDegrees (sDegrees sca
         -- sRoot scale + head [ n | n <- [0,12..], n >= lo - sRoot scale ]
         sRoot scale + 12 * ((lo - sRoot scale) `ceilDiv` 12)
 
+        -- (TODO maybe) This mechanism means that the notes below the lowest
+        -- root in the range will never be used.
+
 wrapDegrees :: [Int] -> [Int]
 wrapDegrees degs = let r = degs ++ map (+12) r in r
 
