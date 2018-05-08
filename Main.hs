@@ -52,6 +52,7 @@ data State = State {
 
 data Pitch = Percussion Scale.MIDINote
            | RootTonal  Scale.Range Int
+           | ShiftTonal Scale.Range Int
     deriving (Eq, Ord, Show)
 
 data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
@@ -105,6 +106,9 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
     pitchToMIDI (RootTonal range deg) = do
         key <- atomically $ sKey <$> readTVar stateVar
         return $ Scale.apply key range deg
+    pitchToMIDI (ShiftTonal range deg) = do
+        key <- atomically $ sKey <$> readTVar stateVar
+        return $ Scale.applyShift key range 0 deg
 
     playPhrase rhythm t0 = do
         let times = [t0, t0 + timing ..]
@@ -377,8 +381,8 @@ sAndBKit = Map.fromList [
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
     "bass" --> map (RootTonal (31,48)) [0..7]
-  , "mid"  --> map (RootTonal (51,72)) [0..9]
-  , "high" --> map (RootTonal (72,89)) [0..7]
+  , "mid"  --> map (ShiftTonal (51,72)) [0..9]
+  , "high" --> map (ShiftTonal (72,89)) [0..7]
   --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
   ]
 
