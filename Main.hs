@@ -22,6 +22,8 @@ import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
 import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raiseSignal)
 
+import qualified Scale
+
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
 minimumGrid = 1000/16  -- 16th of a second
@@ -48,10 +50,15 @@ type Time = Rational  -- millisecs
 
 data State = State {
   sActive :: Map.Map Rhythm (TChan Signal),
-  sInactive :: Map.Map Rhythm Time  -- value is timestamp when it was last killed
+  sInactive :: Map.Map Rhythm Time,  -- value is timestamp when it was last killed
+  sKey :: Scale.Scale
  }
 
-data Note = Note Int Int Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
+data Pitch = Percussion Scale.MIDINote
+           | RootTonal  Scale.Range Int
+    deriving (Eq, Ord, Show)
+
+data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
@@ -71,9 +78,9 @@ findGrid :: (Foldable f) => f Rhythm -> Rational
 findGrid f | null f = 0
            | otherwise = foldl1' gcdRat . map rTiming . toList $ f
 
-type Kit = Map.Map String [Int]
+type Kit = Map.Map String [Pitch]
 
-type ChKit = Map.Map String [(Int,Int)] -- channel, note
+type ChKit = Map.Map String [(Int,Pitch)] -- channel, note
 
 data Signal 
     = SigKill
@@ -98,12 +105,18 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
     where
     timing = rTiming rhythm0
 
-    playNote vmod t (Note ch note vel dur) = do
+    playNote vmod t (Note ch pitch vel dur) = do
         waitTill conn t
         let vel' = round (fromIntegral vel * vmod)
+        note <- pitchToMIDI pitch
         MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
         waitTill conn (t + dur * timing)
         MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+
+    pitchToMIDI (Percussion n) = return n
+    pitchToMIDI (RootTonal range deg) = do
+        key <- atomically $ sKey <$> readTVar stateVar
+        return $ Scale.apply key range deg
 
     playPhrase rhythm t0 = do
         let times = [t0, t0 + timing ..]
@@ -208,10 +221,20 @@ whileM condm action = do
 
 mainThread :: ChKit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
-    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty }
+    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Scale.cMinorPentatonic }
+    -- Display thread
     forkIO . forever $ do
         renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
+    
+    -- Chord change thread
+    forkIO . forever $ do
+        shift <- evalRandIO $ getRandomR (0,11)
+        atomically . modifyTVar stateVar $ \s -> State { sKey = Scale.transposeChr shift (sKey s) }
+        delay <- evalRandIO $ getRandomR (3*10^6,6*10^6)
+        threadDelay delay
+        
+    -- Song evolution thread
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
         makeChange stateVar
@@ -331,13 +354,16 @@ lcmRat r r' = recip (gcdRat (recip r) (recip r'))
 
 repThatKit :: Kit
 repThatKit = Map.fromList [
-  "kick " --> [48, 49, 60, 61, 72, 73],
-  "snare" --> [50, 51, 52, 62, 63, 64, 74, 75, 76],
-  "hat  " --> [42, 46, 54, 56, 58, 66, 68, 70, 78, 80, 82],
-  --"ride " --> [59, 83],
-  "perc " --> [43, 53, 55, 65, 67, 77, 79]
+  "kick " --> perc [48, 49, 60, 61, 72, 73],
+  "snare" --> perc [50, 51, 52, 62, 63, 64, 74, 75, 76],
+  "hat  " --> perc [42, 46, 54, 56, 58, 66, 68, 70, 78, 80, 82],
+  "ride " --> perc [59, 83],
+  "perc " --> perc [43, 53, 55, 65, 67, 77, 79]
   ]
+  where
+  perc = map Percussion
 
+{-
 gamillionKit :: Kit
 gamillionKit = Map.fromList [
   --"kick " --> [36, 37, 48, 49, 60, 61],
@@ -359,24 +385,33 @@ sAndBKit = Map.fromList [
   "perc2" --> [53, 55, 57, 59],
   "perc3" --> [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
   ]
+-}
 
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
-  -- "bass" --> [31,34,36,39,41,43,46,48],
-  "mid"  --> [51,53,55,58,60,63,65,67,70,72],
-  "high" --> [72,75,77,79,82,84,87,89],
-  "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
+    "bass" --> map (RootTonal (31,48)) [0..7]
+  , "mid"  --> map (RootTonal (51,72)) [0..9]
+  , "high" --> map (RootTonal (72,89)) [0..7]
+  --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
   ]
 
+{-
 cMinorBassKit :: Kit
 cMinorBassKit = Map.fromList [
   "bass" --> [31,34,36,39,41,43,46,48]
   ]
+-}
 
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
-myKit = makeChKit [("kit", 1, repThatKit), ("bell", 2, gamillionKit), ("elec", 3, sAndBKit), ("keys", 4, cMinorKit), ("bass", 5, cMinorBassKit)]
+myKit = makeChKit [
+    --  ("kit", 1, repThatKit)
+    --, ("bell", 2, gamillionKit)
+    --, ("elec", 3, sAndBKit)
+    ("keys", 4, cMinorKit)
+    --, ("bass", 5, cMinorBassKit)
+    ]
 
 timeToDie :: IORef Bool
 timeToDie = unsafePerformIO $ newIORef False
