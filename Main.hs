@@ -53,6 +53,7 @@ data State = State {
 data Pitch = Percussion Scale.MIDINote
            | RootTonal  Scale.Range Int
            | ShiftTonal Scale.Range Int
+           | GlobalScaleChange Scale.Scale
     deriving (Eq, Ord, Show)
 
 data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
@@ -97,18 +98,25 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
     playNote vmod t (Note ch pitch vel dur) = do
         waitTill conn t
         let vel' = round (fromIntegral vel * vmod)
-        note <- pitchToMIDI pitch
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
-        waitTill conn (t + dur * timing)
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+        mayNote <- pitchToMIDI pitch
+        case mayNote of
+            Just note | vel' > 0 -> do
+                 MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
+                 waitTill conn (t + dur * timing)
+                 MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+            _ -> do
+                 waitTill conn (t + dur * timing)
 
-    pitchToMIDI (Percussion n) = return n
+    pitchToMIDI (Percussion n) = return (Just n)
     pitchToMIDI (RootTonal range deg) = do
         key <- atomically $ sKey <$> readTVar stateVar
-        return $ Scale.apply key range deg
+        return . Just $ Scale.apply key range deg
     pitchToMIDI (ShiftTonal range deg) = do
         key <- atomically $ sKey <$> readTVar stateVar
-        return $ Scale.applyShift key range 0 deg
+        return . Just $ Scale.applyShift key range 0 deg
+    pitchToMIDI (GlobalScaleChange scale) = do
+        atomically . modifyTVar stateVar $ \s -> s { sKey = scale }
+        return Nothing
 
     playPhrase rhythm t0 = do
         let times = [t0, t0 + timing ..]
@@ -218,13 +226,6 @@ mainThread chkit conn = do
         renderState =<< atomically (readTVar stateVar)
         threadDelay 1000000
     
-    -- Chord change thread
-    void . forkIO . forever $ do
-        shift <- evalRandIO $ getRandomR (0,11)
-        atomically . modifyTVar stateVar $ \s -> s { sKey = Scale.transposeChr shift (sKey s) }
-        delay <- evalRandIO $ getRandomR (3*10^6,6*10^6)
-        threadDelay delay
-        
     -- Song evolution thread
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
@@ -393,6 +394,13 @@ cMinorBassKit = Map.fromList [
   ]
 -}
 
+chordKit :: Kit
+chordKit = Map.fromList [
+    "chord" --> (map GlobalScaleChange $
+        [ Scale.transposeChr d Scale.cMajor | d <- [0..11] ] ++
+        [ Scale.transposeChr d Scale.cMinor | d <- [0..11] ])
+    ]
+
 makeChKit :: [(String, Int, Kit)] -> ChKit
 makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
 
@@ -401,8 +409,9 @@ myKit = makeChKit [
     --  ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
-    ("keys", 4, cMinorKit)
+      ("keys", 4, cMinorKit)
     --, ("bass", 5, cMinorBassKit)
+    , ("chord", 0, chordKit)
     ]
 
 timeToDie :: IORef Bool

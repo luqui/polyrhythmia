@@ -5,7 +5,7 @@ module Scale (
     apply, applyShift,
     numNotes,
     transposeChr,
-    cMinorPentatonic
+    cMinorPentatonic, cMajor, cMinor
 ) where
 
 import Data.Ord (comparing)
@@ -17,6 +17,7 @@ type MIDINote = Int
 -- A scale has a root note in [0,12) (where 0 is C like in MIDI), and an
 -- ascending set of degrees also in [0,12) which are offsets from the root.
 data Scale = Scale { sRoot :: Int, sDegrees :: [Int] }
+    deriving (Eq, Ord, Show)
 
 -- A range is a range of absolute MIDI notes, inclusive.
 type Range = (MIDINote, MIDINote) 
@@ -73,3 +74,9 @@ transposeChr offset (Scale root degrees) = Scale ((root + offset) `mod` 12) degr
 
 cMinorPentatonic :: Scale
 cMinorPentatonic = Scale 0 [0,3,5,7,10]
+
+cMajor, cMinor :: Scale
+cMajor = Scale 0 [0,2,4,5,7,9,11]
+cMinor = Scale 0 [0,2,3,5,7,8,10]
+
+
