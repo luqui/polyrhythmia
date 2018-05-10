@@ -37,7 +37,7 @@ maxModTimeSeconds = 10
 meanModTimeSeconds = 3
 
 mutateProbability :: Double
-mutateProbability = 0.25
+mutateProbability = 0
 
 -- END TWEAKS --
 
@@ -49,7 +49,7 @@ type Time = Rational  -- millisecs
 data State = State {
   sActive :: Map.Map Rhythm (TChan Signal),
   sInactive :: Map.Map Rhythm Time,  -- value is timestamp when it was last killed
-  sKey :: Scale.Scale
+  sKey :: Map.Map Int Scale.Scale  -- vel -> scale
  }
  deriving (Eq)
 
@@ -102,7 +102,10 @@ rhythmThread :: Kit -> TVar State -> MIDI.Connection -> TChan Signal -> Rhythm -
 rhythmThread chkit stateVar conn chan rhythm0 = do
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = quantize timing now
-    go rhythm0 starttime
+    -- volume modulation
+    volperiod <- evalRandIO $ getRandomR (5000.0,20000.0)
+    volamp <- evalRandIO $ getRandomR (0.01, 0.20)
+    go rhythm0 volperiod volamp starttime
 
     where
     timing = rTiming rhythm0
@@ -113,28 +116,33 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
         let vel' = round (fromIntegral vel * vmod)
         when (vel' > 0) $
             pitchToMIDI pitch >>= \case
-                Just note | vel' > 0 -> do
-                     MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
-                     waitTill conn (t + dur * timing)
-                     MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
-                _ -> do
-                     waitTill conn (t + dur * timing)
+                Left note -> do
+                    MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
+                    waitTill conn (t + dur * timing)
+                    MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+                Right scale -> do
+                    atomically . modifyTVar stateVar $ 
+                        \s -> s { sKey = Map.insert vel scale (sKey s) }
+                    waitTill conn (t + dur * timing)
+                    atomically . modifyTVar stateVar $ 
+                        \s -> s { sKey = Map.delete vel (sKey s) }
 
-    pitchToMIDI (Percussion n) = return (Just n)
+    pitchToMIDI (Percussion n) = return (Left n)
     pitchToMIDI (RootTonal range deg) = do
-        key <- atomically $ sKey <$> readTVar stateVar
-        return . Just $ Scale.apply key range deg
+        key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
+        return . Left $ Scale.apply key range deg
     pitchToMIDI (ShiftTonal range deg) = do
-        key <- atomically $ sKey <$> readTVar stateVar
-        return . Just $ Scale.applyShift key range 0 deg
+        key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
+        return . Left $ Scale.applyShift key range 0 deg
     pitchToMIDI (GlobalScaleChange scale) = do
-        atomically . modifyTVar stateVar $ \s -> s { sKey = scale }
-        return Nothing
+        return (Right scale)
 
-    playPhrase rhythm t0 = do
+    playPhrase rhythm volperiod volamp t0 = do
         let times = [t0, t0 + timing ..]
         let !ret = last (zipWith const times (rNotes rhythm ++ [error "too clever"]))
-        forM_ (zip times (rNotes rhythm)) $ \(t, note) -> playNote 1 t note
+        forM_ (zip times (rNotes rhythm)) $ \(t, note) -> 
+            let velmod = 0.5 * (1 + sin (realToFrac t / volperiod)) * volamp
+            in playNote (1-velmod) t note
         return ret
 
     fadePhrase rhythm t0 = do
@@ -143,17 +151,18 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
         forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod, t, note) -> 
             playNote vmod t note
              
-    go rhythm t0 = do
+    go :: Rhythm -> Double -> Double -> Rational -> IO Rhythm
+    go rhythm volperiod volamp t0 = do
         sig <- atomically (tryReadTChan chan)
         case sig of
-            Nothing -> playPhrase rhythm t0 >>= go rhythm
+            Nothing -> playPhrase rhythm volperiod volamp t0 >>= go rhythm volperiod volamp
             Just SigKill -> fadePhrase rhythm t0 >> return rhythm
             Just SigMutate -> do
                 rhythm' <- evalRandIO $ mutate chkit rhythm
                 atomically . modifyTVar stateVar $ \s -> s {
                     sActive = Map.insert rhythm' chan (Map.delete rhythm (sActive s))
                   }
-                playPhrase rhythm' t0 >>= go rhythm'
+                playPhrase rhythm' volperiod volamp t0 >>= go rhythm' volperiod volamp
              
 quantize :: Rational -> Rational -> Rational
 quantize grid x = fromIntegral (floor (x / grid)) * grid
@@ -205,7 +214,7 @@ renderState state = do
     let period = findPeriod (Map.keys (sActive state))
     putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
     putStrLn $ "period: " ++ show (round period) ++ "ms"
-    putStrLn $ "key:    " ++ show (sKey state)
+    putStrLn $ "key:    " ++ show (snd . Map.findMax $ sKey state)
 
     let padding = maximum [ length (rRole r) | r <- Map.keys (sActive state) ]
     mapM_ (putStrLn . renderRhythm timebase padding) (Map.keys (sActive state))
@@ -234,7 +243,7 @@ whileM condm action = do
 
 mainThread :: Kit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
-    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Scale.cMinorPentatonic }
+    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Map.singleton 0 Scale.cMinorPentatonic }
     -- display thread
     void . forkIO . forever $ do
         state <- atomically (readTVar stateVar)
@@ -463,10 +472,10 @@ makeKit kits = Map.unions
 
 myKit :: Kit
 myKit = makeKit [
-      ("kit", 1, repThatKit)
+    --  ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
-    , ("keys", 4, cMinorKit)
+      ("keys", 4, cMinorKit)
     , ("bass", 5, cMinorBassKit)
     , ("chord", 0, chordKit)
     ]
