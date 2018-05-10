@@ -21,11 +21,13 @@ import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raise
 import qualified Scale
 
 -- TWEAKS --
-minimumGrid, maximumPeriod, minimumNote, maximumNote :: Rational
+minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
 minimumGrid = 1000/16  -- 16th of a second
 maximumPeriod = 1000 * 10
 minimumNote = 1000/8
 maximumNote = 1000/2
+minimumChord = 2000
+maximumChord = maximumPeriod
 
 averageVoices :: Int
 averageVoices = 7
@@ -98,14 +100,14 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
     playNote vmod t (Note ch pitch vel dur) = do
         waitTill conn t
         let vel' = round (fromIntegral vel * vmod)
-        mayNote <- pitchToMIDI pitch
-        case mayNote of
-            Just note | vel' > 0 -> do
-                 MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
-                 waitTill conn (t + dur * timing)
-                 MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
-            _ -> do
-                 waitTill conn (t + dur * timing)
+        when (vel' > 0) $
+            pitchToMIDI pitch >>= \case
+                Just note | vel' > 0 -> do
+                     MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
+                     waitTill conn (t + dur * timing)
+                     MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+                _ -> do
+                     waitTill conn (t + dur * timing)
 
     pitchToMIDI (Percussion n) = return (Just n)
     pitchToMIDI (RootTonal range deg) = do
@@ -115,6 +117,7 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
         key <- atomically $ sKey <$> readTVar stateVar
         return . Just $ Scale.applyShift key range 0 deg
     pitchToMIDI (GlobalScaleChange scale) = do
+        print scale
         atomically . modifyTVar stateVar $ \s -> s { sKey = scale }
         return Nothing
 
@@ -323,8 +326,13 @@ makeDerivedRhythm chkit rs = do
     selection <- uniformMay $ do
         g <- newGrids
         p <- newPeriods
-        timing <- map (g*) [1..fromIntegral (floor (maximumNote/g))]
-        guard (minimumNote <= timing && timing <= maximumNote)
+        -- XXX HAAACCKKK
+        let (minT, maxT) = if role == "chord.chord"
+                                then (minimumChord, maximumChord)
+                                else (minimumNote, maximumNote)
+        timing <- map (g*) [fromIntegral(ceiling (minT/g))..fromIntegral (floor (maxT/g))]
+        guard (minT <= timing && timing <= maxT)
+            
 
         maxnotes <- maybeToList (ratToInt (p/timing))
         notes <- divisors maxnotes
@@ -344,7 +352,6 @@ lcmRat r r' = recip (gcdRat (recip r) (recip r'))
 (-->) :: a -> b -> (a,b)
 (-->) = (,)
 
-{-
 repThatKit :: Kit
 repThatKit = Map.fromList [
   "kick " --> perc [48, 49, 60, 61, 72, 73],
@@ -356,6 +363,7 @@ repThatKit = Map.fromList [
   where
   perc = map Percussion
 
+{-
 gamillionKit :: Kit
 gamillionKit = Map.fromList [
   --"kick " --> [36, 37, 48, 49, 60, 61],
@@ -367,17 +375,19 @@ gamillionKit = Map.fromList [
   --"bell4" --> [72..83]
   "bell" --> ([41,43,45,47, 53,55,57,59, 65,67,69,71] ++ [72..83])
   ]
+-}
 
 sAndBKit :: Kit
 sAndBKit = Map.fromList [
-  "kick" --> [36, 37, 48, 49, 60, 61, 72, 73, 84, 85],
-  "snare" --> [38, 39, 40, 50, 51, 52, 62, 63, 64, 74, 75],
-  "hat" --> [42, 44, 46, 54, 56, 58, 66],
-  "perc1" --> [41, 43, 45, 47],
-  "perc2" --> [53, 55, 57, 59],
-  "perc3" --> [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
+  "kick"  --> perc [36, 37, 48, 49, 60, 61, 72, 73, 84, 85],
+  "snare" --> perc [38, 39, 40, 50, 51, 52, 62, 63, 64, 74, 75],
+  "hat"   --> perc [42, 44, 46, 54, 56, 58, 66],
+  "perc1" --> perc [41, 43, 45, 47],
+  "perc2" --> perc [53, 55, 57, 59],
+  "perc3" --> perc [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
   ]
--}
+  where
+  perc = map Percussion
 
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
@@ -387,12 +397,10 @@ cMinorKit = Map.fromList [
   --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
   ]
 
-{-
 cMinorBassKit :: Kit
 cMinorBassKit = Map.fromList [
-  "bass" --> [31,34,36,39,41,43,46,48]
+  "bass" --> map (RootTonal (31,48)) [31,34,36,39,41,43,46,48]
   ]
--}
 
 chordKit :: Kit
 chordKit = Map.fromList [
@@ -406,11 +414,11 @@ makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.ma
 
 myKit :: ChKit
 myKit = makeChKit [
-    --  ("kit", 1, repThatKit)
+      ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
-    --, ("elec", 3, sAndBKit)
-      ("keys", 4, cMinorKit)
-    --, ("bass", 5, cMinorBassKit)
+    , ("elec", 3, sAndBKit)
+    , ("keys", 4, cMinorKit)
+    , ("bass", 5, cMinorBassKit)
     , ("chord", 0, chordKit)
     ]
 
