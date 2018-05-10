@@ -51,6 +51,7 @@ data State = State {
   sInactive :: Map.Map Rhythm Time,  -- value is timestamp when it was last killed
   sKey :: Scale.Scale
  }
+ deriving (Eq)
 
 data Pitch = Percussion Scale.MIDINote
            | RootTonal  Scale.Range Int
@@ -58,13 +59,25 @@ data Pitch = Percussion Scale.MIDINote
            | GlobalScaleChange Scale.Scale
     deriving (Eq, Ord, Show)
 
+data Instrument = Instrument 
+    { iMinLength :: Rational
+    , iMaxLength :: Rational
+    , iMinNotes :: Int
+    , iMaxNotes :: Int
+    , iPeriodExempt :: Bool -- disable period check for this instrument
+                            -- (so rhythms can be longer)
+    , iChannel :: Int
+    , iPitches :: [Pitch]
+    } 
+
 data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
     rTiming :: Rational,
     rRole :: String,
-    rNotes :: [Note] } 
+    rNotes :: [Note],
+    rPeriodExempt :: Bool } 
     deriving (Eq, Ord, Show)
 
 timeLength :: Rhythm -> Rational
@@ -72,22 +85,20 @@ timeLength r = fromIntegral (length (rNotes r)) * rTiming r
 
 findPeriod :: (Foldable f) => f Rhythm -> Rational
 findPeriod f | null f = 1
-             | otherwise = foldl1' lcmRat . map timeLength . toList $ f
+             | otherwise = foldl1' lcmRat . map timeLength . filter (not . rPeriodExempt) . toList $ f
 
 findGrid :: (Foldable f) => f Rhythm -> Rational
 findGrid f | null f = 0
            | otherwise = foldl1' gcdRat . map rTiming . toList $ f
 
-type Kit = Map.Map String [Pitch]
-
-type ChKit = Map.Map String [(Int,Pitch)] -- channel, note
+type Kit = Map.Map String Instrument
 
 data Signal 
     = SigKill
     | SigMutate
     deriving Show
 
-rhythmThread :: ChKit -> TVar State -> MIDI.Connection -> TChan Signal -> Rhythm -> IO Rhythm
+rhythmThread :: Kit -> TVar State -> MIDI.Connection -> TChan Signal -> Rhythm -> IO Rhythm
 rhythmThread chkit stateVar conn chan rhythm0 = do
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = quantize timing now
@@ -117,7 +128,6 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
         key <- atomically $ sKey <$> readTVar stateVar
         return . Just $ Scale.applyShift key range 0 deg
     pitchToMIDI (GlobalScaleChange scale) = do
-        print scale
         atomically . modifyTVar stateVar $ \s -> s { sKey = scale }
         return Nothing
 
@@ -148,7 +158,7 @@ rhythmThread chkit stateVar conn chan rhythm0 = do
 quantize :: Rational -> Rational -> Rational
 quantize grid x = fromIntegral (floor (x / grid)) * grid
 
-mutate :: ChKit -> Rhythm -> Cloud Rhythm
+mutate :: Kit -> Rhythm -> Cloud Rhythm
 mutate chkit r = do
     notes' <- mapM mutateNote (rNotes r)
     return $ r { rNotes = notes' }
@@ -164,7 +174,7 @@ waitTill conn target = do
     now <- fromIntegral <$> MIDI.currentTime conn
     threadDelay (floor (1000 * (target - now)))
 
-rhythmMain :: ChKit -> MIDI.Connection -> TVar State -> Rhythm -> IO ()
+rhythmMain :: Kit -> MIDI.Connection -> TVar State -> Rhythm -> IO ()
 rhythmMain chkit conn stateVar rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
     maychan <- atomically $ do
@@ -195,6 +205,7 @@ renderState state = do
     let period = findPeriod (Map.keys (sActive state))
     putStrLn $ "grid:   " ++ show (round timebase) ++ "ms"
     putStrLn $ "period: " ++ show (round period) ++ "ms"
+    putStrLn $ "key:    " ++ show (sKey state)
 
     let padding = maximum [ length (rRole r) | r <- Map.keys (sActive state) ]
     mapM_ (putStrLn . renderRhythm timebase padding) (Map.keys (sActive state))
@@ -221,15 +232,17 @@ whileM condm action = do
     r <- condm
     when r (action >> whileM condm action)
 
-mainThread :: ChKit -> MIDI.Connection -> IO ()
+mainThread :: Kit -> MIDI.Connection -> IO ()
 mainThread chkit conn = do
     stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Scale.cMinorPentatonic }
-    -- Display thread
+    -- display thread
     void . forkIO . forever $ do
-        renderState =<< atomically (readTVar stateVar)
-        threadDelay 1000000
-    
-    -- Song evolution thread
+        state <- atomically (readTVar stateVar)
+        renderState state
+        atomically $ do
+            state' <- readTVar stateVar
+            when (state == state') retry
+    -- song evolution thread:
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
         makeChange stateVar
@@ -271,18 +284,20 @@ mainThread chkit conn = do
 
 type Cloud = Rand StdGen
 
-randomNote :: ChKit -> String -> Cloud Note
-randomNote chkit role =
-     uncurry Note <$> uniform (chkit Map.! role) 
-                  <*> (id =<< uniform [return 0, getRandomR (32,127)]) 
-                  <*> uniform [1/10, 1/2, 9/10, 1]
+randomNote :: Kit -> String -> Cloud Note
+randomNote chkit role = do
+    let instr = chkit Map.! role
+    pitch <- uniform (iPitches instr)
+    vel <- id =<< uniform [return 0, getRandomR (32,127)]
+    dur <- uniform [1/10, 1/2, 9/10, 1]
+    return $ Note (iChannel instr) pitch vel dur
 
-makeRhythmRole :: ChKit -> String -> Rational -> Int -> Cloud Rhythm
+makeRhythmRole :: Kit -> String -> Rational -> Int -> Cloud Rhythm
 makeRhythmRole chkit role timing numNotes = do
     notes <- replicateM numNotes (randomNote chkit role)
-    return $ Rhythm timing role notes
+    return $ Rhythm timing role notes (iPeriodExempt (chkit Map.! role))
 
-makeRhythm :: ChKit -> Rational -> Int -> Cloud Rhythm
+makeRhythm :: Kit -> Rational -> Int -> Cloud Rhythm
 makeRhythm chkit timing numNotes = do
     role <- uniform (Map.keys chkit)
     makeRhythmRole chkit role timing numNotes
@@ -307,36 +322,38 @@ ratToInt :: Rational -> Maybe Integer
 ratToInt r | denominator r == 1 = Just (numerator r)
            | otherwise = Nothing
 
-divisors :: Integer -> [Integer]
+divisors :: (Integral a) => a -> [a]
 divisors n = [ m | m <- [1..n], n `mod` m == 0 ]
 
-makeDerivedRhythm :: ChKit -> [Rhythm] -> Cloud (Maybe Rhythm)
+makeDerivedRhythm :: Kit -> [Rhythm] -> Cloud (Maybe Rhythm)
 makeDerivedRhythm chkit [] = do
     timing <- (2000 %) <$> getRandomR (4,12)
     notes  <- uniform [3..8]
     Just <$> makeRhythm chkit timing notes
 makeDerivedRhythm chkit rs = do
     role <- uniform (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
+    let instr = chkit Map.! role
     let grid = findGrid rs
     let newGrids = map (grid/) [1..fromIntegral (floor (grid/minimumGrid))]
 
     let period = findPeriod rs
-    let newPeriods = map (period*) [1..fromIntegral (floor (maximumPeriod/period))]
+    let newPeriods
+            | iPeriodExempt instr
+                = map (period*) [1..fromIntegral (iMaxNotes instr)]
+            | otherwise 
+                = map (period*) [1..fromIntegral (floor (maximumPeriod/period))]
 
     selection <- uniformMay $ do
         g <- newGrids
         p <- newPeriods
-        -- XXX HAAACCKKK
-        let (minT, maxT) = if role == "chord.chord"
-                                then (minimumChord, maximumChord)
-                                else (minimumNote, maximumNote)
+        let (minT, maxT) = (iMinLength instr, iMaxLength instr)
         timing <- map (g*) [fromIntegral(ceiling (minT/g))..fromIntegral (floor (maxT/g))]
         guard (minT <= timing && timing <= maxT)
             
 
-        maxnotes <- maybeToList (ratToInt (p/timing))
+        maxnotes <- map fromIntegral (maybeToList (ratToInt (p/timing)))
         notes <- divisors maxnotes
-        guard (3 <= notes && notes <= 16)
+        guard (iMinNotes instr <= notes && notes <= iMaxNotes instr)
         return (timing, fromIntegral notes)
 
     case selection of
@@ -352,28 +369,60 @@ lcmRat r r' = recip (gcdRat (recip r) (recip r'))
 (-->) :: a -> b -> (a,b)
 (-->) = (,)
 
+defaultInstrument :: Instrument
+defaultInstrument = Instrument
+    { iMinLength = minimumNote
+    , iMaxLength = maximumNote
+    , iMinNotes = 3
+    , iMaxNotes = 16
+    , iPeriodExempt = False
+    , iChannel = 0
+    , iPitches = []
+    }
+
+perc :: [Int] -> Instrument
+perc notes = defaultInstrument { iPitches = map Percussion notes }
+
+rootTonal :: Scale.Range -> Instrument
+rootTonal range = defaultInstrument { iPitches = map (RootTonal range) [0..m] }
+    where
+    m = ceiling (fromIntegral (snd range - fst range) * 7/12)
+
+shiftTonal :: Scale.Range -> Instrument
+shiftTonal range = defaultInstrument { iPitches = map (ShiftTonal range) [0..m] }
+    where
+    m = ceiling (fromIntegral (snd range - fst range) * 7/12)
+
+chords :: [Scale.Scale] -> Instrument
+chords scales = defaultInstrument
+    { iPitches = map GlobalScaleChange scales
+    , iMinLength = minimumChord
+    , iMaxLength = maximumChord
+    , iMinNotes = 1
+    , iMaxNotes = 4
+    , iPeriodExempt = True
+    }
+
 repThatKit :: Kit
 repThatKit = Map.fromList [
-  "kick " --> perc [48, 49, 60, 61, 72, 73],
+  "kick"  --> perc [48, 49, 60, 61, 72, 73],
   "snare" --> perc [50, 51, 52, 62, 63, 64, 74, 75, 76],
-  "hat  " --> perc [42, 46, 54, 56, 58, 66, 68, 70, 78, 80, 82],
-  "ride " --> perc [59, 83],
-  "perc " --> perc [43, 53, 55, 65, 67, 77, 79]
+  "hat"   --> perc [42, 46, 54, 56, 58, 66, 68, 70, 78, 80, 82],
+  "ride"  --> perc [59, 83],
+  "perc"  --> perc [43, 53, 55, 65, 67, 77, 79]
   ]
-  where
-  perc = map Percussion
 
 {-
 gamillionKit :: Kit
 gamillionKit = Map.fromList [
-  --"kick " --> [36, 37, 48, 49, 60, 61],
-  --"snare" --> [38, 39, 40, 50, 51, 52, 62, 63, 64],
-  --"hat  " --> [42, 44, 46, 54, 56, 58, 66, 68, 70],
-  --"bell1" --> [41, 43, 45, 47],
-  --"bell2" --> [53, 55, 57, 59],
-  --"bell3" --> [65, 67, 69, 71],
-  --"bell4" --> [72..83]
-  "bell" --> ([41,43,45,47, 53,55,57,59, 65,67,69,71] ++ [72..83])
+  --"kick"  --> perc [36, 37, 48, 49, 60, 61],
+  --"snare" --> perc [38, 39, 40, 50, 51, 52, 62, 63, 64],
+  --"hat"   --> perc [42, 44, 46, 54, 56, 58, 66, 68, 70],
+  --"bell1" --> perc [41, 43, 45, 47],
+  --"bell2" --> perc [53, 55, 57, 59],
+  --"bell3" --> perc [65, 67, 69, 71],
+  --"bell4" --> perc [72..83]
+  "bell" --> perc ([41,43,45,47, 53,55,57,59, 65,67,69,71] ++ [72..83])
   ]
 -}
 
@@ -386,37 +435,37 @@ sAndBKit = Map.fromList [
   "perc2" --> perc [53, 55, 57, 59],
   "perc3" --> perc [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
   ]
-  where
-  perc = map Percussion
 
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
-    "bass" --> map (RootTonal (31,48)) [0..7]
-  , "mid"  --> map (ShiftTonal (51,72)) [0..9]
-  , "high" --> map (ShiftTonal (72,89)) [0..7]
+    "bass" --> rootTonal (31,48)
+  , "mid"  --> shiftTonal (51,72)
+  , "high" --> shiftTonal (72,89)
   --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
   ]
 
 cMinorBassKit :: Kit
 cMinorBassKit = Map.fromList [
-  "bass" --> map (RootTonal (31,48)) [31,34,36,39,41,43,46,48]
+  "bass" --> rootTonal (31,48)
   ]
 
 chordKit :: Kit
 chordKit = Map.fromList [
-    "chord" --> (map GlobalScaleChange $
+    "chord" --> (chords $ 
         [ Scale.transposeChr d Scale.cMajor | d <- [0..11] ] ++
         [ Scale.transposeChr d Scale.cMinor | d <- [0..11] ])
     ]
 
-makeChKit :: [(String, Int, Kit)] -> ChKit
-makeChKit kits = Map.unions [ Map.mapKeysMonotonic ((name ++ ".") ++) . (fmap.map) (ch,) $ kit | (name, ch, kit) <- kits ]
+makeKit :: [(String, Int, Kit)] -> Kit
+makeKit kits = Map.unions 
+    [ Map.mapKeysMonotonic ((name ++ ".") ++) . fmap (\i -> i { iChannel = ch }) $ kit 
+    | (name, ch, kit) <- kits ]
 
-myKit :: ChKit
-myKit = makeChKit [
+myKit :: Kit
+myKit = makeKit [
       ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
-    , ("elec", 3, sAndBKit)
+    --, ("elec", 3, sAndBKit)
     , ("keys", 4, cMinorKit)
     , ("bass", 5, cMinorBassKit)
     , ("chord", 0, chordKit)
