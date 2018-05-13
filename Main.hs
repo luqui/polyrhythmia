@@ -80,10 +80,10 @@ data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of
     deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
-    rTiming :: Rational,
+    rPeriodExempt :: Bool,
     rRole :: String,
-    rNotes :: [Note],
-    rPeriodExempt :: Bool } 
+    rTiming :: Rational,
+    rNotes :: [Note] } 
     deriving (Eq, Ord, Show)
 
 timeLength :: Rhythm -> Rational
@@ -284,7 +284,12 @@ randomNote chkit role = do
 makeRhythmRole :: Kit -> String -> Rational -> Int -> Cloud Rhythm
 makeRhythmRole chkit role timing numNotes = do
     notes <- replicateM numNotes (randomNote chkit role)
-    return $ Rhythm timing role notes (iPeriodExempt (chkit Map.! role))
+    return $ Rhythm 
+        { rTiming = timing
+        , rRole = role
+        , rNotes = notes
+        , rPeriodExempt = iPeriodExempt (chkit Map.! role)
+        }
 
 makeRhythm :: Kit -> Rational -> Int -> Cloud Rhythm
 makeRhythm chkit timing numNotes = do
