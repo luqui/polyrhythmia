@@ -11,7 +11,7 @@ import Data.Foldable (toList)
 import Data.Maybe (maybeToList)
 import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
-import Data.List (foldl1')
+import Data.List (foldl', foldl1')
 import Control.Monad.Random
 import Data.Ratio
 import System.Console.ANSI (clearScreen, setCursorPosition)
@@ -91,11 +91,11 @@ timeLength r = fromIntegral (length (rNotes r)) * rTiming r
 
 findPeriod :: (Foldable f) => f Rhythm -> Rational
 findPeriod f | null f = 1
-             | otherwise = foldl1' lcmRat . map timeLength . filter (not . rPeriodExempt) . toList $ f
+             | otherwise = lcmsRat . map timeLength . filter (not . rPeriodExempt) . toList $ f
 
 findGrid :: (Foldable f) => f Rhythm -> Rational
 findGrid f | null f = 0
-           | otherwise = foldl1' gcdRat . map rTiming . toList $ f
+           | otherwise = gcdsRat . map rTiming . toList $ f
 
 type Kit = Map.Map String Instrument
 
@@ -179,7 +179,8 @@ rhythmMain conn stateVar rhythm = do
             return $ return ()
         else do
             chan <- newTChan
-            writeTVar stateVar $ state { sActive = Map.insert rhythm (ActiveRecord chan) (sActive state) }
+            writeTVar stateVar $ state { sActive = Map.insert rhythm (ActiveRecord chan) (sActive state)
+                                       , sInactive = Map.delete rhythm (sInactive state) }
             return $ do
                 rhythmThread stateVar conn chan rhythm
                 now <- fromIntegral <$> MIDI.currentTime conn
@@ -292,8 +293,8 @@ makeRhythm chkit timing numNotes = do
 
 admits :: (Foldable f) => f Rhythm -> Rhythm -> Bool
 admits rs = \cand -> and [ minimumGrid <= gcdRat grid (rTiming cand)
-                       , lcmRat period (timeLength cand) <= maximumPeriod
-                       ]
+                         , rPeriodExempt cand || lcmRat period (timeLength cand) <= maximumPeriod
+                         ]
     where
     grid = findGrid rs
     period = findPeriod rs
@@ -351,8 +352,15 @@ makeDerivedRhythm chkit rs = do
 gcdRat :: Rational -> Rational -> Rational
 gcdRat r r' = gcd (numerator r) (numerator r') % lcm (denominator r) (denominator r')
 
+gcdsRat  :: [Rational] -> Rational
+gcdsRat = foldl' gcdRat 0
+
 lcmRat :: Rational -> Rational -> Rational
-lcmRat r r' = recip (gcdRat (recip r) (recip r'))
+lcmRat r r' = lcm (numerator r) (numerator r') % gcd (denominator r) (denominator r')
+
+lcmsRat :: [Rational] -> Rational
+lcmsRat [] = 1          -- I think this should be "1/0".
+lcmsRat xs = foldl1' lcmRat xs
 
 (-->) :: a -> b -> (a,b)
 (-->) = (,)
