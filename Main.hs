@@ -30,7 +30,7 @@ minimumChord = 2000
 maximumChord = maximumPeriod
 
 averageVoices :: Int
-averageVoices = 7
+averageVoices = 4
 
 maxModTimeSeconds, meanModTimeSeconds :: Double
 maxModTimeSeconds = 10
@@ -62,6 +62,7 @@ data State = State {
 data Pitch = Percussion Scale.MIDINote
            | RootTonal  Scale.Range Int
            | ShiftTonal Scale.Range Int
+           | ControlChange Int
            | GlobalScaleChange Scale.Scale
     deriving (Eq, Ord, Show)
 
@@ -120,27 +121,34 @@ rhythmThread stateVar conn chan rhythm = do
         waitTill conn t
         let vel' = round (fromIntegral vel * vmod)
         when (vel' > 0) $
-            pitchToMIDI pitch >>= \case
-                Left note -> do
-                    MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel'))
-                    waitTill conn (t + dur * timing)
-                    MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
-                Right scale -> do
-                    atomically . modifyTVar stateVar $ 
-                        \s -> s { sKey = Map.insert vel scale (sKey s) }
-                    waitTill conn (t + dur * timing)
-                    atomically . modifyTVar stateVar $ 
-                        \s -> s { sKey = Map.delete vel (sKey s) }
+            pitchToMIDI pitch ch vel' (waitTill conn (t + dur * timing))
 
-    pitchToMIDI (Percussion n) = return (Left n)
-    pitchToMIDI (RootTonal range deg) = do
+    pitchToMIDI :: Pitch -> Int -> Int -> IO () -> IO ()
+    pitchToMIDI (Percussion n) ch vel wait = do
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn n vel))
+        wait
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn n 0))
+    pitchToMIDI (RootTonal range deg) ch vel wait = do
         key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
-        return . Left $ Scale.apply key range deg
-    pitchToMIDI (ShiftTonal range deg) = do
+        let note = Scale.apply key range deg
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
+        wait
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+    pitchToMIDI (ShiftTonal range deg) ch vel wait = do
         key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
-        return . Left $ Scale.applyShift key range 0 deg
-    pitchToMIDI (GlobalScaleChange scale) = do
-        return (Right scale)
+        let note = Scale.apply key range deg
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
+        wait
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+    pitchToMIDI (ControlChange ctrl) ch vel wait = do
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.CC ctrl vel))
+        wait
+    pitchToMIDI (GlobalScaleChange scale) ch vel wait = do
+        atomically . modifyTVar stateVar $ 
+            \s -> s { sKey = Map.insert vel scale (sKey s) }
+        wait
+        atomically . modifyTVar stateVar $ 
+            \s -> s { sKey = Map.delete vel (sKey s) }
 
     playPhrase volperiod volamp t0 = do
         let times = [t0, t0 + timing ..]
@@ -404,6 +412,16 @@ chords scales = defaultInstrument
     , iPeriodExempt = True
     }
 
+pedal :: Instrument
+pedal = defaultInstrument
+    { iPitches = [ControlChange 64]
+    , iMinLength = minimumNote
+    , iMaxLength = maximumChord
+    , iMinNotes = 1
+    , iMaxNotes = 4
+    , iPeriodExempt = True
+    }
+
 repThatKit :: Kit
 repThatKit = Map.fromList [
   "kick"  --> perc [48, 49, 60, 61, 72, 73],
@@ -443,6 +461,7 @@ cMinorKit = Map.fromList [
   , "mid"  --> shiftTonal (51,72)
   , "high" --> shiftTonal (72,89)
   --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
+  , "pedal" --> pedal
   ]
 
 cMinorBassKit :: Kit
@@ -464,11 +483,11 @@ makeKit kits = Map.unions
 
 myKit :: Kit
 myKit = makeKit [
-      ("kit", 1, repThatKit)
+    --  ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
-    , ("elec", 3, sAndBKit)
-    , ("keys", 4, cMinorKit)
-    , ("bass", 5, cMinorBassKit)
+    --, ("elec", 3, sAndBKit)
+      ("keys", 4, cMinorKit)
+    --, ("bass", 5, cMinorBassKit)
     , ("chord", 0, chordKit)
     ]
 
