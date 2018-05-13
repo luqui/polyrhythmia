@@ -106,7 +106,7 @@ data Message
 rhythmThread :: TVar State -> MIDI.Connection -> TChan Message -> Rhythm -> IO ()
 rhythmThread stateVar conn chan rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
-    let starttime = quantize timing now
+    let starttime = quantize (timeLength rhythm) now
     -- volume modulation
     volperiod <- evalRandIO $ getRandomR (5000.0,20000.0)
     volamp <- evalRandIO $ getRandomR (0.01, 0.20)
@@ -164,7 +164,7 @@ rhythmThread stateVar conn chan rhythm = do
             Just MsgTerm -> fadePhrase t0
              
 quantize :: Rational -> Rational -> Rational
-quantize grid x = fromIntegral (floor (x / grid)) * grid
+quantize grid x = fromIntegral (ceiling (x / grid)) * grid
 
 waitTill :: MIDI.Connection -> Time -> IO ()
 waitTill conn target = do
