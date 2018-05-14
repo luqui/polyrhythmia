@@ -22,7 +22,7 @@ import qualified Scale
 
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
-minimumGrid = 1000/16  -- 16th of a second
+minimumGrid = 1000/10  -- 10th of a second
 maximumPeriod = 1000 * 10
 minimumNote = 1000/8
 maximumNote = 1000/2
@@ -34,7 +34,7 @@ averageVoices = 4
 
 maxModTimeSeconds, meanModTimeSeconds :: Double
 maxModTimeSeconds = 10
-meanModTimeSeconds = 3
+meanModTimeSeconds = 5
 
 -- END TWEAKS --
 
@@ -84,7 +84,9 @@ data Rhythm = Rhythm {
     rPeriodExempt :: Bool,
     rRole :: String,
     rTiming :: Rational,
-    rNotes :: [Note] } 
+    rNotes :: [Note],
+    rAltNotes :: [Note]  -- played as a pickup to phrase alignment
+    }
     deriving (Eq, Ord, Show)
 
 timeLength :: Rhythm -> Rational
@@ -110,7 +112,7 @@ rhythmThread stateVar conn chan rhythm = do
     let starttime = quantize (timeLength rhythm) now
     -- volume modulation
     volperiod <- evalRandIO $ getRandomR (5000.0,20000.0)
-    volamp <- evalRandIO $ getRandomR (0.01, 0.20)
+    volamp <- evalRandIO $ getRandomR (0.01, 0.99)
     go volperiod volamp starttime
 
     where
@@ -150,13 +152,22 @@ rhythmThread stateVar conn chan rhythm = do
         atomically . modifyTVar stateVar $ 
             \s -> s { sKey = Map.delete vel (sKey s) }
 
-    playPhrase volperiod volamp t0 = do
+    playPhrase volperiod volamp t0 notes = do
         let times = [t0, t0 + timing ..]
-        let !ret = last (zipWith const times (rNotes rhythm ++ [error "too clever"]))
-        forM_ (zip times (rNotes rhythm)) $ \(t, note) -> 
+        let !ret = last (zipWith const times (notes ++ [error "too clever"]))
+        forM_ (zip times notes) $ \(t, note) -> 
             let velmod = 0.5 * (1 + sin (realToFrac t / volperiod)) * volamp
             in playNote (1-velmod) t note
         return ret
+
+    chooseAndPlayPhrase volperiod volamp t0 = do
+        state <- atomically $ readTVar stateVar
+        let end = t0 + timeLength rhythm
+        if end == quantize (findPeriod (Map.keys (sActive state))) end
+            then
+                playPhrase volperiod volamp t0 (rAltNotes rhythm)
+            else
+                playPhrase volperiod volamp t0 (rNotes rhythm)
 
     fadePhrase t0 = do
         let times = [t0, t0 + timing ..]
@@ -168,7 +179,7 @@ rhythmThread stateVar conn chan rhythm = do
     go volperiod volamp t0 = do
         sig <- atomically (tryReadTChan chan)
         case sig of
-            Nothing -> playPhrase volperiod volamp t0 >>= go volperiod volamp
+            Nothing -> chooseAndPlayPhrase volperiod volamp t0 >>= go volperiod volamp
             Just MsgTerm -> fadePhrase t0
              
 quantize :: Rational -> Rational -> Rational
@@ -292,11 +303,13 @@ randomNote chkit role = do
 makeRhythmRole :: Kit -> String -> Rational -> Int -> Cloud Rhythm
 makeRhythmRole chkit role timing numNotes = do
     notes <- replicateM numNotes (randomNote chkit role)
+    altNotes <- replicateM numNotes (randomNote chkit role)
     return $ Rhythm 
         { rTiming = timing
         , rRole = role
         , rNotes = notes
         , rPeriodExempt = iPeriodExempt (chkit Map.! role)
+        , rAltNotes = altNotes
         }
 
 makeRhythm :: Kit -> Rational -> Int -> Cloud Rhythm
@@ -383,7 +396,7 @@ defaultInstrument = Instrument
     { iMinLength = minimumNote
     , iMaxLength = maximumNote
     , iMinNotes = 3
-    , iMaxNotes = 16
+    , iMaxNotes = 8
     , iPeriodExempt = False
     , iChannel = 0
     , iPitches = []
@@ -476,6 +489,15 @@ chordKit = Map.fromList [
         [ Scale.transposeChr d Scale.cMinor | d <- [0..11] ])
     ]
 
+glitchKit :: Kit
+glitchKit = Map.fromList [
+    "kick"  --> perc [36,37,48,49,60,61,72,73],
+    "snare" --> perc [38,40,50,52,62,64,74,76],
+    "hat"   --> perc [44,46,58],
+    "click" --> perc [39,41,42,43,53,54,56,57,59
+                     ,69,77,78,79,81,83,84,86,89]
+    ]
+
 makeKit :: [(String, Int, Kit)] -> Kit
 makeKit kits = Map.unions 
     [ Map.mapKeysMonotonic ((name ++ ".") ++) . fmap (\i -> i { iChannel = ch }) $ kit 
@@ -483,12 +505,13 @@ makeKit kits = Map.unions
 
 myKit :: Kit
 myKit = makeKit [
-    --  ("kit", 1, repThatKit)
+    --("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
       ("keys", 4, cMinorKit)
-    --, ("bass", 5, cMinorBassKit)
+    --("bass", 4, cMinorBassKit)
     , ("chord", 0, chordKit)
+    , ("glitch", 6, glitchKit)
     ]
 
 timeToDie :: IORef Bool
