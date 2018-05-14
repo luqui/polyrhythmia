@@ -22,7 +22,7 @@ import qualified Scale
 
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
-minimumGrid = 1000/10  -- 10th of a second
+minimumGrid = 1000/16  -- 16th of a second
 maximumPeriod = 1000 * 10
 minimumNote = 1000/8
 maximumNote = 1000/2
@@ -30,7 +30,7 @@ minimumChord = 2000
 maximumChord = maximumPeriod
 
 averageVoices :: Int
-averageVoices = 4
+averageVoices = 8
 
 maxModTimeSeconds, meanModTimeSeconds :: Double
 maxModTimeSeconds = 10
@@ -75,6 +75,7 @@ data Instrument = Instrument
                             -- (so rhythms can be longer)
     , iChannel :: Int
     , iPitches :: [Pitch]
+    , iModulate :: Bool
     } 
 
 data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
@@ -85,7 +86,8 @@ data Rhythm = Rhythm {
     rRole :: String,
     rTiming :: Rational,
     rNotes :: [Note],
-    rAltNotes :: [Note]  -- played as a pickup to phrase alignment
+    rAltNotes :: [Note],  -- played as a pickup to phrase alignment
+    rModulate :: Bool
     }
     deriving (Eq, Ord, Show)
 
@@ -121,7 +123,8 @@ rhythmThread stateVar conn chan rhythm = do
     playNote :: Double -> Time -> Note -> IO ()
     playNote vmod t (Note ch pitch vel dur) = do
         waitTill conn t
-        let vel' = round (fromIntegral vel * vmod)
+        let vel' | rModulate rhythm = round (fromIntegral vel * vmod)
+                 | otherwise = vel
         when (vel' > 0) $
             pitchToMIDI pitch ch vel' (waitTill conn (t + dur * timing))
 
@@ -310,6 +313,7 @@ makeRhythmRole chkit role timing numNotes = do
         , rNotes = notes
         , rPeriodExempt = iPeriodExempt (chkit Map.! role)
         , rAltNotes = altNotes
+        , rModulate = iModulate (chkit Map.! role)
         }
 
 makeRhythm :: Kit -> Rational -> Int -> Cloud Rhythm
@@ -400,6 +404,7 @@ defaultInstrument = Instrument
     , iPeriodExempt = False
     , iChannel = 0
     , iPitches = []
+    , iModulate = True
     }
 
 perc :: [Int] -> Instrument
@@ -421,8 +426,9 @@ chords scales = defaultInstrument
     , iMinLength = minimumChord
     , iMaxLength = maximumChord
     , iMinNotes = 1
-    , iMaxNotes = 4
-    , iPeriodExempt = True
+    , iMaxNotes = 8
+    , iPeriodExempt = False
+    , iModulate = False
     }
 
 pedal :: Instrument
@@ -431,8 +437,9 @@ pedal = defaultInstrument
     , iMinLength = minimumNote
     , iMaxLength = maximumChord
     , iMinNotes = 1
-    , iMaxNotes = 4
-    , iPeriodExempt = True
+    , iMaxNotes = 8
+    , iPeriodExempt = False
+    , iModulate = False
     }
 
 repThatKit :: Kit
@@ -505,11 +512,11 @@ makeKit kits = Map.unions
 
 myKit :: Kit
 myKit = makeKit [
-    --("kit", 1, repThatKit)
+      ("kit", 1, repThatKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
-      ("keys", 4, cMinorKit)
-    --("bass", 4, cMinorBassKit)
+    , ("keys", 4, cMinorKit)
+    , ("bass", 4, cMinorBassKit)
     , ("chord", 0, chordKit)
     , ("glitch", 6, glitchKit)
     ]
