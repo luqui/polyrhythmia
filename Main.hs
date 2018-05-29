@@ -32,9 +32,8 @@ maximumChord = maximumPeriod
 averageVoices :: Int
 averageVoices = 8
 
-maxModTimeSeconds, meanModTimeSeconds :: Double
-maxModTimeSeconds = 10
-meanModTimeSeconds = 5
+modTime :: Int
+modTime = 4000
 
 -- END TWEAKS --
 
@@ -148,7 +147,7 @@ rhythmThread stateVar conn chan rhythm = do
     pitchToMIDI (ControlChange ctrl) ch vel wait = do
         MIDI.send conn (MIDI.MidiMessage ch (MIDI.CC ctrl vel))
         wait
-    pitchToMIDI (GlobalScaleChange scale) ch vel wait = do
+    pitchToMIDI (GlobalScaleChange scale) _ch vel wait = do
         atomically . modifyTVar stateVar $ 
             \s -> s { sKey = Map.insert vel scale (sKey s) }
         wait
@@ -258,10 +257,12 @@ mainThread chkit conn = do
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
         makeChange stateVar
-        -- exp distribution
-        param <- evalRandIO $ getRandomR (0, 1 :: Double)
-        let delay = min (maxModTimeSeconds*10^6) (-log param * meanModTimeSeconds*10^6) 
-        threadDelay (floor delay)
+        state <- atomically $ readTVar stateVar
+        now <- fromIntegral <$> MIDI.currentTime conn
+        let period = findPeriod (Map.keys (sActive state))
+        let next = quantize period (now + fromIntegral modTime) - 200   -- make modification slightly before beginning of phrase
+          -- so thread has time to start on time (& maybe even pickup)
+        waitTill conn next
   where
   makeChange stateVar = do
     voices <- fromIntegral . length . sActive <$> atomically (readTVar stateVar)
@@ -442,6 +443,15 @@ pedal = defaultInstrument
     , iModulate = False
     }
 
+studioDrummerKit :: Kit
+studioDrummerKit = Map.fromList [
+  "kick" --> perc [36],
+  "snare" --> perc [37, 38, 39, 40],
+  "hat" --> perc [42, 44, 46],
+  "tom" --> perc [41, 43, 45, 47],
+  "ride" --> perc [50, 53]
+  ]
+
 repThatKit :: Kit
 repThatKit = Map.fromList [
   "kick"  --> perc [48, 49, 60, 61, 72, 73],
@@ -512,13 +522,13 @@ makeKit kits = Map.unions
 
 myKit :: Kit
 myKit = makeKit [
-      ("kit", 1, repThatKit)
+    ("kit", 4, studioDrummerKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
-    , ("keys", 4, cMinorKit)
-    , ("bass", 4, cMinorBassKit)
+    , ("keys", 3, cMinorKit)
+    , ("bass", 2, cMinorBassKit)
     , ("chord", 0, chordKit)
-    , ("glitch", 6, glitchKit)
+    , ("glitch", 1, glitchKit)
     ]
 
 timeToDie :: IORef Bool
