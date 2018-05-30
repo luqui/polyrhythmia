@@ -18,6 +18,7 @@ import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
 import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raiseSignal)
 
+import qualified APC40
 import qualified Scale
 
 -- TWEAKS --
@@ -37,8 +38,19 @@ modTime = 4000
 
 -- END TWEAKS --
 
+data Conns = Conns {
+    cMainConn :: MIDI.Connection,
+    cAPC :: Maybe APC40.Devs
+  }
+
 openConn :: IO MIDI.Connection
-openConn = MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") . MIDI.getName) =<< MIDI.enumerateDestinations 
+openConn = do
+    dest <- MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") . MIDI.getName) =<< MIDI.enumerateDestinations 
+    MIDI.start dest
+    return dest
+
+openConns :: IO Conns
+openConns = Conns <$> openConn <*> APC40.openDevs
 
 type Time = Rational  -- millisecs
 
@@ -73,11 +85,12 @@ data Instrument = Instrument
     , iPeriodExempt :: Bool -- disable period check for this instrument
                             -- (so rhythms can be longer)
     , iChannel :: Int
+    , iAPCCoord :: Maybe (Int, Int)
     , iPitches :: [Pitch]
     , iModulate :: Bool
     } 
 
-data Note = Note Int Pitch Int Rational  -- ch note vel dur  (dur in fraction of voice timing)
+data Note = Note Int Pitch Int Rational (Maybe (Int,Int))  -- ch note vel dur apccoord  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
@@ -107,8 +120,11 @@ data Message
     = MsgTerm
     deriving Show
 
-rhythmThread :: TVar State -> MIDI.Connection -> TChan Message -> Rhythm -> IO ()
-rhythmThread stateVar conn chan rhythm = do
+whenMay :: (Monad m) => Maybe a -> (a -> m ()) -> m ()
+whenMay m f = maybe (return ()) f m
+
+rhythmThread :: TVar State -> Conns -> TChan Message -> Rhythm -> IO ()
+rhythmThread stateVar conns chan rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = quantize (timeLength rhythm) now
     -- volume modulation
@@ -118,14 +134,21 @@ rhythmThread stateVar conn chan rhythm = do
 
     where
     timing = rTiming rhythm
+    conn = cMainConn conns
 
     playNote :: Double -> Time -> Note -> IO ()
-    playNote vmod t (Note ch pitch vel dur) = do
+    playNote vmod t (Note ch pitch vel dur coord) = do
         waitTill conn t
         let vel' | rModulate rhythm = round (fromIntegral vel * vmod)
                  | otherwise = vel
-        when (vel' > 0) $
+        when (vel' > 0) $ do
+            whenMay (cAPC conns) $ \apc -> 
+                whenMay coord $ \(x,y) -> 
+                    APC40.lightOn x y 60 apc
             pitchToMIDI pitch ch vel' (waitTill conn (t + dur * timing))
+            whenMay (cAPC conns) $ \apc -> 
+                whenMay coord $ \(x,y) -> 
+                    APC40.lightOn x y 0 apc
 
     pitchToMIDI :: Pitch -> Int -> Int -> IO () -> IO ()
     pitchToMIDI (Percussion n) ch vel wait = do
@@ -192,8 +215,8 @@ waitTill conn target = do
     now <- fromIntegral <$> MIDI.currentTime conn
     threadDelay (floor (1000 * (target - now)))
 
-rhythmMain :: MIDI.Connection -> TVar State -> Rhythm -> IO ()
-rhythmMain conn stateVar rhythm = do
+rhythmMain :: Conns -> TVar State -> Rhythm -> IO ()
+rhythmMain conns stateVar rhythm = do
     join . atomically $ do
         state <- readTVar stateVar
         if rhythm `Map.member` sActive state then
@@ -203,8 +226,8 @@ rhythmMain conn stateVar rhythm = do
             writeTVar stateVar $ state { sActive = Map.insert rhythm (ActiveRecord chan) (sActive state)
                                        , sInactive = Map.delete rhythm (sInactive state) }
             return $ do
-                rhythmThread stateVar conn chan rhythm
-                now <- fromIntegral <$> MIDI.currentTime conn
+                rhythmThread stateVar conns chan rhythm
+                now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
                 atomically . modifyTVar stateVar $ \s -> s { sActive = Map.delete rhythm (sActive s)
                                                            , sInactive = Map.insert rhythm (InactiveRecord now) (sInactive s) }
 
@@ -233,9 +256,9 @@ renderRhythm timebase padding rhythm =
       ++ " |" ++ concat [ renderNote n ++ replicate (spacing - 1) ' ' | n <- rNotes rhythm ] ++ "|"
     where
     spacing = floor (rTiming rhythm / timebase)
-    renderNote (Note _ _ v _) | v == 0    = "."
-                              | v < 75    = "x"
-                              | otherwise = "X"
+    renderNote (Note _ _ v _ _) | v == 0    = "."
+                                | v < 75    = "x"
+                                | otherwise = "X"
     padString p s = take p (s ++ repeat ' ')
 
 whileM :: (Monad m) => m Bool -> m () -> m ()
@@ -243,8 +266,8 @@ whileM condm action = do
     r <- condm
     when r (action >> whileM condm action)
 
-mainThread :: Kit -> MIDI.Connection -> IO ()
-mainThread chkit conn = do
+mainThread :: Kit -> Conns -> IO ()
+mainThread chkit conns = do
     stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Map.singleton 0 Scale.cMinorPentatonic }
     -- display thread
     void . forkIO . forever $ do
@@ -258,11 +281,11 @@ mainThread chkit conn = do
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
         makeChange stateVar
         state <- atomically $ readTVar stateVar
-        now <- fromIntegral <$> MIDI.currentTime conn
+        now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
         let period = findPeriod (Map.keys (sActive state))
         let next = quantize period (now + fromIntegral modTime) - 200   -- make modification slightly before beginning of phrase
           -- so thread has time to start on time (& maybe even pickup)
-        waitTill conn next
+        waitTill (cMainConn conns) next
   where
   makeChange stateVar = do
     voices <- fromIntegral . length . sActive <$> atomically (readTVar stateVar)
@@ -276,7 +299,7 @@ mainThread chkit conn = do
 
   newRhythmReal stateVar = void . forkIO $ do
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
-    now <- fromIntegral <$> MIDI.currentTime conn
+    now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
     ret <- evalRandIO $ do
         pastr <- fmap (state,) <$> makeDerivedRhythm chkit (Map.keys (sActive state))
         newr <- choosePastRhythm state now
@@ -285,7 +308,7 @@ mainThread chkit conn = do
         Nothing -> return()
         Just (state', r) -> do
             atomically (writeTVar stateVar state')
-            rhythmMain conn stateVar r
+            rhythmMain conns stateVar r
 
   sendRandMessage sig stateVar = do
     state <- atomically (readTVar stateVar)
@@ -302,7 +325,7 @@ randomNote chkit role = do
     pitch <- uniform (iPitches instr)
     vel <- id =<< uniform [return 0, getRandomR (32,127)]
     dur <- uniform [1/10, 1/2, 9/10, 1]
-    return $ Note (iChannel instr) pitch vel dur
+    return $ Note (iChannel instr) pitch vel dur (iAPCCoord instr)
 
 makeRhythmRole :: Kit -> String -> Rational -> Int -> Cloud Rhythm
 makeRhythmRole chkit role timing numNotes = do
@@ -405,11 +428,12 @@ defaultInstrument = Instrument
     , iPeriodExempt = False
     , iChannel = 0
     , iPitches = []
+    , iAPCCoord = Nothing
     , iModulate = True
     }
 
-perc :: [Int] -> Instrument
-perc notes = defaultInstrument { iPitches = map Percussion notes }
+perc :: (Int, Int) -> [Int] -> Instrument
+perc coord notes = defaultInstrument { iPitches = map Percussion notes, iAPCCoord = Just coord }
 
 rootTonal :: Scale.Range -> Instrument
 rootTonal range = defaultInstrument { iPitches = map (RootTonal range) [0..m] }
@@ -445,13 +469,14 @@ pedal = defaultInstrument
 
 studioDrummerKit :: Kit
 studioDrummerKit = Map.fromList [
-  "kick" --> perc [36],
-  "snare" --> perc [37, 38, 39, 40],
-  "hat" --> perc [42, 44, 46],
-  "tom" --> perc [41, 43, 45, 47],
-  "ride" --> perc [50, 53]
+  "kick"  --> perc (1,1) [36],
+  "snare" --> perc (1,2) [37, 38, 39, 40],
+  "hat"   --> perc (1,3) [42, 44, 46],
+  "tom"   --> perc (1,4) [41, 43, 45, 47],
+  "ride"  --> perc (1,5) [50, 53]
   ]
 
+{-
 repThatKit :: Kit
 repThatKit = Map.fromList [
   "kick"  --> perc [48, 49, 60, 61, 72, 73],
@@ -505,14 +530,15 @@ chordKit = Map.fromList [
         [ Scale.transposeChr d Scale.cMajor | d <- [0..11] ] ++
         [ Scale.transposeChr d Scale.cMinor | d <- [0..11] ])
     ]
+-}
 
 glitchKit :: Kit
 glitchKit = Map.fromList [
-    "kick"  --> perc [36,37,48,49,60,61,72,73],
-    "snare" --> perc [38,40,50,52,62,64,74,76],
-    "hat"   --> perc [44,46,58],
-    "click" --> perc [39,41,42,43,53,54,56,57,59
-                     ,69,77,78,79,81,83,84,86,89]
+    "kick"  --> perc (2,1) [36,37,48,49,60,61,72,73],
+    "snare" --> perc (2,2) [38,40,50,52,62,64,74,76],
+    "hat"   --> perc (2,3) [44,46,58],
+    "click" --> perc (2,3) [39,41,42,43,53,54,56,57,59
+                           ,69,77,78,79,81,83,84,86,89]
     ]
 
 makeKit :: [(String, Int, Kit)] -> Kit
@@ -522,13 +548,13 @@ makeKit kits = Map.unions
 
 myKit :: Kit
 myKit = makeKit [
-    ("kit", 4, studioDrummerKit)
+      ("kit", 1, studioDrummerKit)
+    , ("glitch", 2, glitchKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
-    , ("keys", 3, cMinorKit)
-    , ("bass", 2, cMinorBassKit)
-    , ("chord", 0, chordKit)
-    , ("glitch", 1, glitchKit)
+    --, ("keys", 3, cMinorKit)
+    --, ("bass", 2, cMinorBassKit)
+    --, ("chord", 0, chordKit)
     ]
 
 timeToDie :: IORef Bool
@@ -536,10 +562,9 @@ timeToDie = unsafePerformIO $ newIORef False
 
 main :: IO ()
 main = do
-    !conn <- openConn
-    MIDI.start conn
+    !conns <- openConns
     void $ installHandler sigINT (Catch onInt) Nothing
-    mainThread myKit conn
+    mainThread myKit conns
     where
     onInt = do
         dietime <- readIORef timeToDie
