@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -Wall -Wno-type-defaults #-}
-{-# LANGUAGE BangPatterns, TupleSections, LambdaCase #-}
+{-# LANGUAGE BangPatterns, TupleSections, LambdaCase, MultiWayIf #-}
 
 import qualified System.MIDI as MIDI
 import qualified Data.Map as Map
@@ -196,7 +196,8 @@ rhythmThread stateVar conns chan rhythm = do
     chooseAndPlayPhrase volperiod volamp t0 = do
         state <- atomically $ readTVar stateVar
         let end = t0 + timeLength rhythm
-        if end == quantize (findPeriod (Map.keys (sActive state))) end
+        let period = findPeriod (Map.keys (sActive state))
+        if end == quantize period end && period /= timeLength rhythm
             then
                 playPhrase volperiod volamp t0 (rAltNotes rhythm)
             else
@@ -213,7 +214,8 @@ rhythmThread stateVar conns chan rhythm = do
         sig <- atomically (tryReadTChan chan)
         case sig of
             Nothing -> chooseAndPlayPhrase volperiod volamp t0 >>= go volperiod volamp
-            Just MsgTerm -> fadePhrase t0
+            Just MsgTerm -> --fadePhrase t0
+                            return ()
              
 quantize :: Rational -> Rational -> Rational
 quantize grid x = fromIntegral (ceiling (x / grid)) * grid
@@ -284,9 +286,27 @@ mainThread chkit conns = do
         atomically $ do
             state' <- readTVar stateVar
             when (state == state') retry
+    -- APC thread
+    whenMay (cAPC conns) $ \apcdevs -> void . forkIO . forever $ do
+        state <- atomically (readTVar stateVar)
+        events <- APC40.pollNotes apcdevs
+        let roles = [ role
+                    | coord <- events 
+                    , Just role <- pure (Map.lookup coord roleMap)
+                    ]
+        forM_ roles $ \role -> do
+            let rhythms = filter ((role ==) . rRole . fst) (Map.assocs (sActive state))
+            if null rhythms then
+                newRhythmReal (Just role) stateVar
+            else
+                forM_ (map (arMessageChan . snd) rhythms) $ \chan -> do
+                    atomically (writeTChan chan MsgTerm)
+        threadDelay 30000
+                
     -- song evolution thread:
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
+        {-
         makeChange stateVar
         state <- atomically $ readTVar stateVar
         now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
@@ -294,6 +314,9 @@ mainThread chkit conns = do
         let next = quantize period (now + fromIntegral modTime) - 200   -- make modification slightly before beginning of phrase
           -- so thread has time to start on time (& maybe even pickup)
         waitTill (cMainConn conns) next
+        -}
+        threadDelay 1000000
+    
   where
   makeChange stateVar = do
     voices <- fromIntegral . length . sActive <$> atomically (readTVar stateVar)
@@ -303,14 +326,14 @@ mainThread chkit conns = do
 
   newRhythm stateVar = do
     dietime <- readIORef timeToDie
-    if dietime then sendRandMessage MsgTerm stateVar else newRhythmReal stateVar
+    if dietime then sendRandMessage MsgTerm stateVar else newRhythmReal Nothing stateVar
 
-  newRhythmReal stateVar = void . forkIO $ do
+  newRhythmReal mayrole stateVar = void . forkIO $ do
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
     now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
     ret <- evalRandIO $ do
-        pastr <- fmap (state,) <$> makeDerivedRhythm chkit (Map.keys (sActive state))
-        newr <- choosePastRhythm state now
+        pastr <- fmap (state,) <$> makeDerivedRhythmG mayrole chkit (Map.keys (sActive state))
+        newr <- choosePastRhythm mayrole state now
         uniform [pastr `mplus` newr, newr `mplus` pastr]
     case ret of
         Nothing -> return()
@@ -363,11 +386,12 @@ admits rs = \cand -> and [ minimumGrid <= gcdRat grid (rTiming cand)
     period = findPeriod rs
     roles = Set.fromList (map rRole (toList rs))
 
-choosePastRhythm :: State -> Time -> Cloud (Maybe (State, Rhythm))
-choosePastRhythm state now = do
+choosePastRhythm :: Maybe String -> State -> Time -> Cloud (Maybe (State, Rhythm))
+choosePastRhythm mayrole state now = do
     choice <- weightedMay $ do
         (rhythm, irecord) <- Map.assocs (sInactive state)
         guard (Map.keys (sActive state) `admits` rhythm)
+        guard (maybe True (rRole rhythm ==) mayrole)
         return (rhythm, now - irLastKillTime irecord)
     return $ fmap (state,) choice
 
@@ -379,14 +403,21 @@ divisors :: (Integral a) => a -> [a]
 divisors n = [ m | m <- [1..n], n `mod` m == 0 ]
 
 makeDerivedRhythm :: Kit -> [Rhythm] -> Cloud (Maybe Rhythm)
-makeDerivedRhythm chkit [] = do
+makeDerivedRhythm chkit rs = do
+    mayrole <- uniformMay (Map.keysSet chkit `Set.difference` Set.fromList (map rRole rs))
+    case mayrole of
+        Nothing -> return Nothing
+        Just role -> makeDerivedRhythmRole role chkit rs
+
+makeDerivedRhythmG :: Maybe String -> Kit -> [Rhythm] -> Cloud (Maybe Rhythm)
+makeDerivedRhythmG = maybe makeDerivedRhythm makeDerivedRhythmRole
+
+makeDerivedRhythmRole :: String -> Kit -> [Rhythm] -> Cloud (Maybe Rhythm)
+makeDerivedRhythmRole role chkit [] = do
     timing <- (2000 %) <$> getRandomR (4,12)
     notes  <- uniform [3..8]
-    Just <$> makeRhythm chkit timing notes
-makeDerivedRhythm chkit rs = 
-    uniformMay (Map.keysSet chkit `Set.difference` Set.fromList (map rRole rs)) >>= \case
-    Nothing -> return Nothing
-    Just role -> do
+    Just <$> makeRhythmRole chkit role timing notes
+makeDerivedRhythmRole role chkit rs = do
     let instr = chkit Map.! role
     let grid = findGrid rs
     let newGrids = map (grid/) [1..fromIntegral (floor (grid/minimumGrid))]
@@ -479,15 +510,6 @@ pedal = defaultInstrument
     , iModulate = False
     }
 
-studioDrummerKit :: Kit
-studioDrummerKit = Map.fromList [
-  "kick"  --> perc (APCCoord 1 1 (0,0,1)) [36],
-  "snare" --> perc (APCCoord 1 2 (1,1,0)) [37, 38, 39, 40],
-  "hat"   --> perc (APCCoord 1 3 (0,1,0)) [42, 44, 46],
-  "tom"   --> perc (APCCoord 1 4 (1,0,0)) [41, 43, 45, 47],
-  "ride"  --> perc (APCCoord 1 5 (1,0,1)) [50, 53]
-  ]
-
 {-
 repThatKit :: Kit
 repThatKit = Map.fromList [
@@ -533,6 +555,15 @@ chordKit = Map.fromList [
     ]
 -}
 
+studioDrummerKit :: Kit
+studioDrummerKit = Map.fromList [
+  "kick"  --> perc (APCCoord 1 1 (0,0,1)) [36],
+  "snare" --> perc (APCCoord 1 2 (1,1,0)) [37, 38, 39, 40],
+  "hat"   --> perc (APCCoord 1 3 (0,1,0)) [42, 44, 46],
+  "tom"   --> perc (APCCoord 1 4 (1,0,0)) [41, 43, 45, 47],
+  "ride"  --> perc (APCCoord 1 5 (1,0,1)) [50, 53]
+  ]
+
 glitchKit :: Kit
 glitchKit = Map.fromList [
     "kick"  --> perc (APCCoord 2 1 (0,0,1)) [36,37,48,49,60,61,72,73],
@@ -556,6 +587,19 @@ myKit = makeKit [
     --, ("keys", 3, cMinorKit)
     --, ("bass", 2, cMinorBassKit)
     --, ("chord", 0, chordKit)
+    ]
+
+roleMap :: Map.Map (Int,Int) String
+roleMap = Map.fromList
+    [ (1,1) --> "kit.kick"
+    , (1,2) --> "kit.snare"
+    , (1,3) --> "kit.hat"
+    , (1,4) --> "kit.tom"
+    , (1,5) --> "kit.ride"
+    , (2,1) --> "glitch.kick"
+    , (2,2) --> "glitch.snare"
+    , (2,3) --> "glitch.hat"
+    , (2,4) --> "glitch.click"
     ]
 
 timeToDie :: IORef Bool

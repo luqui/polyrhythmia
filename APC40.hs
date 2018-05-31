@@ -2,6 +2,9 @@ module APC40
     ( Devs
     , openDevs
     , lightOn
+    , coordToNote
+    , noteToCoord
+    , pollNotes
     , RGB
     , rgbToVel
     )
@@ -26,6 +29,8 @@ openDevs = do
             srcconn <- MIDI.openSource src Nothing
             destconn <- MIDI.openDestination dest
 
+            MIDI.start srcconn
+
             MIDI.sendSysEx destconn [
                 0x47, 0x7f, 0x29, 0x60, 0x00, 0x04,
                 0x40 + 0x00,     -- Generic Mode
@@ -35,10 +40,26 @@ openDevs = do
             return . Just $ Devs srcconn destconn
         _ -> return Nothing
 
+pollNotes :: Devs -> IO [(Int, Int)]
+pollNotes devs = do
+    events <- MIDI.getEvents (dSource devs)
+    return [ coord | MIDI.MidiEvent _ (MIDI.MidiMessage _ (MIDI.NoteOn note v)) <- events
+                   , v /= 0
+                   , Just coord <- pure (noteToCoord note)
+                   ]
+
 lightOn :: Int -> Int -> Int -> Devs -> IO ()
 lightOn x y vel devs = MIDI.send (dDest devs) $ MIDI.MidiMessage 1 (MIDI.NoteOn note vel)
     where
-    note = 8*(4-(y-1))+x-1
+    note = coordToNote (x,y)
+
+coordToNote :: (Int, Int) -> Int
+coordToNote (x, y) = 8*(4-(y-1))+x-1
+
+noteToCoord :: Int -> Maybe (Int, Int)
+noteToCoord n
+    | 0 <= n && n < 40 = Just (n `mod` 8 + 1, 4 - n `div` 8 + 1)
+    | otherwise = Nothing
 
 type RGB = (Double, Double, Double)
 
