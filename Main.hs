@@ -3,6 +3,7 @@
 
 import qualified System.MIDI as MIDI
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Control.Concurrent.STM
@@ -90,8 +91,11 @@ data Instrument = Instrument
     , iModulate :: Bool
     } 
 
-data APCCoord = APCCoord Int Int Int | NoCoord -- x y vel
+data APCCoord = APCCoord Int Int APC40.RGB | NoCoord
     deriving (Eq, Ord, Show)
+
+rgbMagToVel :: APC40.RGB -> Double -> Int
+rgbMagToVel (r,g,b) mag = APC40.rgbToVel (r*mag,g*mag,b*mag)
 
 data Note = Note Int Pitch Int Rational APCCoord  -- ch note vel dur apccoord  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
@@ -147,8 +151,8 @@ rhythmThread stateVar conns chan rhythm = do
         when (vel' > 0) $ do
             whenMay (cAPC conns) $ \apc -> 
                 case coord of
-                    APCCoord x y v -> void . forkIO $ do
-                        APC40.lightOn x y v apc
+                    APCCoord x y color -> void . forkIO $ do
+                        APC40.lightOn x y (rgbMagToVel color (fromIntegral vel' / 127)) apc
                         waitTill conn (t + 0.9 * minimumGrid)
                         APC40.lightOn x y 0 apc
                     NoCoord -> return ()
@@ -352,10 +356,12 @@ makeRhythm chkit timing numNotes = do
 admits :: (Foldable f) => f Rhythm -> Rhythm -> Bool
 admits rs = \cand -> and [ minimumGrid <= gcdRat grid (rTiming cand)
                          , rPeriodExempt cand || lcmRat period (timeLength cand) <= maximumPeriod
+                         , rRole cand `Set.notMember` roles
                          ]
     where
     grid = findGrid rs
     period = findPeriod rs
+    roles = Set.fromList (map rRole (toList rs))
 
 choosePastRhythm :: State -> Time -> Cloud (Maybe (State, Rhythm))
 choosePastRhythm state now = do
@@ -377,8 +383,10 @@ makeDerivedRhythm chkit [] = do
     timing <- (2000 %) <$> getRandomR (4,12)
     notes  <- uniform [3..8]
     Just <$> makeRhythm chkit timing notes
-makeDerivedRhythm chkit rs = do
-    role <- uniform (Map.keysSet chkit) -- uniformMay (Map.keysSet kit `Set.difference` Set.fromList (map rRole rs))
+makeDerivedRhythm chkit rs = 
+    uniformMay (Map.keysSet chkit `Set.difference` Set.fromList (map rRole rs)) >>= \case
+    Nothing -> return Nothing
+    Just role -> do
     let instr = chkit Map.! role
     let grid = findGrid rs
     let newGrids = map (grid/) [1..fromIntegral (floor (grid/minimumGrid))]
@@ -439,9 +447,6 @@ defaultInstrument = Instrument
 perc :: APCCoord -> [Int] -> Instrument
 perc coord notes = defaultInstrument { iPitches = map Percussion notes, iAPCCoord = coord }
 
-colorPerc :: Int -> Int -> [Int] -> Instrument
-colorPerc x y notes = 
-
 rootTonal :: Scale.Range -> Instrument
 rootTonal range = defaultInstrument { iPitches = map (RootTonal range) [0..m] }
     where
@@ -476,11 +481,11 @@ pedal = defaultInstrument
 
 studioDrummerKit :: Kit
 studioDrummerKit = Map.fromList [
-  "kick"  --> perc (APCCoord 1 1 1) [36],
-  "snare" --> perc (APCCoord 1 2 2) [37, 38, 39, 40],
-  "hat"   --> perc (APCCoord 1 3 3) [42, 44, 46],
-  "tom"   --> perc (APCCoord 1 4 4) [41, 43, 45, 47],
-  "ride"  --> perc (APCCoord 1 5 5) [50, 53]
+  "kick"  --> perc (APCCoord 1 1 (0,0,1)) [36],
+  "snare" --> perc (APCCoord 1 2 (1,1,0)) [37, 38, 39, 40],
+  "hat"   --> perc (APCCoord 1 3 (0,1,0)) [42, 44, 46],
+  "tom"   --> perc (APCCoord 1 4 (1,0,0)) [41, 43, 45, 47],
+  "ride"  --> perc (APCCoord 1 5 (1,0,1)) [50, 53]
   ]
 
 {-
@@ -530,11 +535,11 @@ chordKit = Map.fromList [
 
 glitchKit :: Kit
 glitchKit = Map.fromList [
-    "kick"  --> perc (APCCoord 2 1 6) [36,37,48,49,60,61,72,73],
-    "snare" --> perc (APCCoord 2 2 7) [38,40,50,52,62,64,74,76],
-    "hat"   --> perc (APCCoord 2 3 8) [44,46,58],
-    "click" --> perc (APCCoord 2 4 9) [39,41,42,43,53,54,56,57,59
-                                      ,69,77,78,79,81,83,84,86,89]
+    "kick"  --> perc (APCCoord 2 1 (0,0,1)) [36,37,48,49,60,61,72,73],
+    "snare" --> perc (APCCoord 2 2 (1,1,0)) [38,40,50,52,62,64,74,76],
+    "hat"   --> perc (APCCoord 2 3 (0,1,0)) [44,46,58],
+    "click" --> perc (APCCoord 2 4 (0,1,1)) [39,41,42,43,53,54,56,57,59
+                                            ,69,77,78,79,81,83,84,86,89]
     ]
 
 makeKit :: [(String, Int, Kit)] -> Kit

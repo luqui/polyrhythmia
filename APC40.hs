@@ -5,6 +5,7 @@ module APC40
     , RGB
     , rgbToVel
     )
+where
 
 import qualified System.MIDI as MIDI
 import Control.Monad (filterM)
