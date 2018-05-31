@@ -85,12 +85,15 @@ data Instrument = Instrument
     , iPeriodExempt :: Bool -- disable period check for this instrument
                             -- (so rhythms can be longer)
     , iChannel :: Int
-    , iAPCCoord :: Maybe (Int, Int)
+    , iAPCCoord :: APCCoord
     , iPitches :: [Pitch]
     , iModulate :: Bool
     } 
 
-data Note = Note Int Pitch Int Rational (Maybe (Int,Int))  -- ch note vel dur apccoord  (dur in fraction of voice timing)
+data APCCoord = APCCoord Int Int Int | NoCoord -- x y vel
+    deriving (Eq, Ord, Show)
+
+data Note = Note Int Pitch Int Rational APCCoord  -- ch note vel dur apccoord  (dur in fraction of voice timing)
     deriving (Eq, Ord, Show)
 
 data Rhythm = Rhythm {
@@ -143,12 +146,13 @@ rhythmThread stateVar conns chan rhythm = do
                  | otherwise = vel
         when (vel' > 0) $ do
             whenMay (cAPC conns) $ \apc -> 
-                whenMay coord $ \(x,y) -> 
-                    APC40.lightOn x y 60 apc
+                case coord of
+                    APCCoord x y v -> void . forkIO $ do
+                        APC40.lightOn x y v apc
+                        waitTill conn (t + 0.9 * minimumGrid)
+                        APC40.lightOn x y 0 apc
+                    NoCoord -> return ()
             pitchToMIDI pitch ch vel' (waitTill conn (t + dur * timing))
-            whenMay (cAPC conns) $ \apc -> 
-                whenMay coord $ \(x,y) -> 
-                    APC40.lightOn x y 0 apc
 
     pitchToMIDI :: Pitch -> Int -> Int -> IO () -> IO ()
     pitchToMIDI (Percussion n) ch vel wait = do
@@ -428,12 +432,15 @@ defaultInstrument = Instrument
     , iPeriodExempt = False
     , iChannel = 0
     , iPitches = []
-    , iAPCCoord = Nothing
+    , iAPCCoord = NoCoord
     , iModulate = True
     }
 
-perc :: (Int, Int) -> [Int] -> Instrument
-perc coord notes = defaultInstrument { iPitches = map Percussion notes, iAPCCoord = Just coord }
+perc :: APCCoord -> [Int] -> Instrument
+perc coord notes = defaultInstrument { iPitches = map Percussion notes, iAPCCoord = coord }
+
+colorPerc :: Int -> Int -> [Int] -> Instrument
+colorPerc x y notes = 
 
 rootTonal :: Scale.Range -> Instrument
 rootTonal range = defaultInstrument { iPitches = map (RootTonal range) [0..m] }
@@ -469,11 +476,11 @@ pedal = defaultInstrument
 
 studioDrummerKit :: Kit
 studioDrummerKit = Map.fromList [
-  "kick"  --> perc (1,1) [36],
-  "snare" --> perc (1,2) [37, 38, 39, 40],
-  "hat"   --> perc (1,3) [42, 44, 46],
-  "tom"   --> perc (1,4) [41, 43, 45, 47],
-  "ride"  --> perc (1,5) [50, 53]
+  "kick"  --> perc (APCCoord 1 1 1) [36],
+  "snare" --> perc (APCCoord 1 2 2) [37, 38, 39, 40],
+  "hat"   --> perc (APCCoord 1 3 3) [42, 44, 46],
+  "tom"   --> perc (APCCoord 1 4 4) [41, 43, 45, 47],
+  "ride"  --> perc (APCCoord 1 5 5) [50, 53]
   ]
 
 {-
@@ -500,22 +507,11 @@ gamillionKit = Map.fromList [
   ]
 -}
 
-sAndBKit :: Kit
-sAndBKit = Map.fromList [
-  "kick"  --> perc [36, 37, 48, 49, 60, 61, 72, 73, 84, 85],
-  "snare" --> perc [38, 39, 40, 50, 51, 52, 62, 63, 64, 74, 75],
-  "hat"   --> perc [42, 44, 46, 54, 56, 58, 66],
-  "perc1" --> perc [41, 43, 45, 47],
-  "perc2" --> perc [53, 55, 57, 59],
-  "perc3" --> perc [65, 67, 86, 88, 91, 92, 93, 94, 95, 98, 100]
-  ]
-
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
     "bass" --> rootTonal (31,48)
   , "mid"  --> shiftTonal (51,72)
   , "high" --> shiftTonal (72,89)
-  --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
   , "pedal" --> pedal
   ]
 
@@ -534,11 +530,11 @@ chordKit = Map.fromList [
 
 glitchKit :: Kit
 glitchKit = Map.fromList [
-    "kick"  --> perc (2,1) [36,37,48,49,60,61,72,73],
-    "snare" --> perc (2,2) [38,40,50,52,62,64,74,76],
-    "hat"   --> perc (2,3) [44,46,58],
-    "click" --> perc (2,3) [39,41,42,43,53,54,56,57,59
-                           ,69,77,78,79,81,83,84,86,89]
+    "kick"  --> perc (APCCoord 2 1 6) [36,37,48,49,60,61,72,73],
+    "snare" --> perc (APCCoord 2 2 7) [38,40,50,52,62,64,74,76],
+    "hat"   --> perc (APCCoord 2 3 8) [44,46,58],
+    "click" --> perc (APCCoord 2 4 9) [39,41,42,43,53,54,56,57,59
+                                      ,69,77,78,79,81,83,84,86,89]
     ]
 
 makeKit :: [(String, Int, Kit)] -> Kit
