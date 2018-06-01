@@ -7,35 +7,31 @@ import qualified Data.Set as Set
 import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Control.Concurrent.STM
-import Control.Applicative
 import Data.Foldable (toList)
 import Data.Maybe (maybeToList)
-import Data.IORef
-import System.IO.Unsafe (unsafePerformIO)
 import Data.List (foldl', foldl1')
-import Control.Monad.Random
+import Control.Monad.Random hiding (next)
 import Data.Ratio
 import System.Console.ANSI (clearScreen, setCursorPosition)
 import System.IO (hFlush, stdout)
-import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raiseSignal)
 
 import qualified APC40
 import qualified Scale
 
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
-minimumGrid = 1000/16  -- 16th of a second
+minimumGrid = 1000/10  -- 10th of a second
 maximumPeriod = 1000 * 10
 minimumNote = 1000/8
 maximumNote = 1000/2
 minimumChord = 2000
 maximumChord = maximumPeriod
 
-averageVoices :: Int
-averageVoices = 8
-
 modTime :: Int
-modTime = 4000
+modTime = 10000
+
+inputAccuracy :: Int
+inputAccuracy = 50
 
 -- END TWEAKS --
 
@@ -130,6 +126,73 @@ data Message
 whenMay :: (Monad m) => Maybe a -> (a -> m ()) -> m ()
 whenMay m f = maybe (return ()) f m
 
+-- A GhostEntry records whether an apc key was pressed recently enough to
+-- warrant playing the note, and also whether a note was triggered recently
+-- enough to play when the apc key is pressed.
+data GhostEntry = GhostNone | GhostNote Note | GhostKey (Int,Int)
+
+type GhostMap = Map.Map (Int,Int) (TVar GhostEntry)
+
+playNoteNow :: Conns -> TVar State -> Rational -> Note -> IO ()
+playNoteNow conns stateVar timing (Note ch pitch 0 dur coord) = return ()
+playNoteNow conns stateVar timing (Note ch pitch vel dur coord) = do
+    (midi0, midi1) <- pitchToMIDI pitch 
+    (apc0, apc1) <- apcCommands coord
+    midi0
+    apc0
+
+    let lightOffTime = 0.9 * minimumGrid
+    let noteOffTime = dur * timing
+
+    if lightOffTime < noteOffTime then do
+        threadDelay (floor (1000 * lightOffTime))
+        apc1
+        threadDelay (floor (1000 * (noteOffTime - lightOffTime)))
+        midi1
+    else do
+        threadDelay (floor (1000 * noteOffTime))
+        midi1
+        threadDelay (floor (1000 * (lightOffTime - noteOffTime)))
+        apc1
+
+    where
+    infix 0 //
+    a // b = return (a, b)
+
+    conn = cMainConn conns
+
+    apcCommands :: APCCoord -> IO (IO (), IO ())
+    apcCommands (APCCoord x y color) = do
+        case cAPC conns of
+            Nothing -> return () // return ()
+            Just apc -> APC40.lightOn x y (rgbMagToVel color (fromIntegral vel / 127)) apc
+                        // APC40.lightOn x y 0 apc
+    apcCommands NoCoord = return () // return ()
+
+    pitchToMIDI :: Pitch -> IO (IO (), IO ())
+    pitchToMIDI (Percussion n) = 
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn n vel))
+            // MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn n 0))
+    pitchToMIDI (RootTonal range deg)  = do
+        key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
+        let note = Scale.apply key range deg
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
+            // MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+    pitchToMIDI (ShiftTonal range deg)  = do
+        key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
+        let note = Scale.apply key range deg
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
+            // MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
+    pitchToMIDI (ControlChange ctrl) = 
+        MIDI.send conn (MIDI.MidiMessage ch (MIDI.CC ctrl vel))
+            // return ()
+    pitchToMIDI (GlobalScaleChange scale) = do
+        atomically (modifyTVar stateVar 
+            (\s -> s { sKey = Map.insert vel scale (sKey s) }))
+        // atomically (modifyTVar stateVar 
+            (\s -> s { sKey = Map.delete vel (sKey s) }))
+    
+
 rhythmThread :: TVar State -> Conns -> TChan Message -> Rhythm -> IO ()
 rhythmThread stateVar conns chan rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
@@ -144,46 +207,13 @@ rhythmThread stateVar conns chan rhythm = do
     conn = cMainConn conns
 
     playNote :: Double -> Time -> Note -> IO ()
-    playNote vmod t (Note ch pitch vel dur coord) = do
+    playNote vmod t note = do
         waitTill conn t
-        let vel' | rModulate rhythm = round (fromIntegral vel * vmod)
-                 | otherwise = vel
-        when (vel' > 0) $ do
-            whenMay (cAPC conns) $ \apc -> 
-                case coord of
-                    APCCoord x y color -> void . forkIO $ do
-                        APC40.lightOn x y (rgbMagToVel color (fromIntegral vel' / 127)) apc
-                        waitTill conn (t + 0.9 * minimumGrid)
-                        APC40.lightOn x y 0 apc
-                    NoCoord -> return ()
-            pitchToMIDI pitch ch vel' (waitTill conn (t + dur * timing))
+        --let vel' | rModulate rhythm = round (fromIntegral vel * vmod)
+        --         | otherwise = vel
+        --when (vel' > 0) $ 
+        playNoteNow conns stateVar timing note
 
-    pitchToMIDI :: Pitch -> Int -> Int -> IO () -> IO ()
-    pitchToMIDI (Percussion n) ch vel wait = do
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn n vel))
-        wait
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn n 0))
-    pitchToMIDI (RootTonal range deg) ch vel wait = do
-        key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
-        let note = Scale.apply key range deg
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
-        wait
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
-    pitchToMIDI (ShiftTonal range deg) ch vel wait = do
-        key <- atomically $ snd . Map.findMax . sKey <$> readTVar stateVar
-        let note = Scale.apply key range deg
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
-        wait
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
-    pitchToMIDI (ControlChange ctrl) ch vel wait = do
-        MIDI.send conn (MIDI.MidiMessage ch (MIDI.CC ctrl vel))
-        wait
-    pitchToMIDI (GlobalScaleChange scale) _ch vel wait = do
-        atomically . modifyTVar stateVar $ 
-            \s -> s { sKey = Map.insert vel scale (sKey s) }
-        wait
-        atomically . modifyTVar stateVar $ 
-            \s -> s { sKey = Map.delete vel (sKey s) }
 
     playPhrase volperiod volamp t0 notes = do
         let times = [t0, t0 + timing ..]
@@ -203,12 +233,6 @@ rhythmThread stateVar conns chan rhythm = do
             else
                 playPhrase volperiod volamp t0 (rNotes rhythm)
 
-    fadePhrase t0 = do
-        let times = [t0, t0 + timing ..]
-        let velmod = [1,1-1/40..1/40]
-        forM_ (zip3 velmod times (cycle (rNotes rhythm))) $ \(vmod, t, note) -> 
-            playNote vmod t note
-             
     go :: Double -> Double -> Rational -> IO ()
     go volperiod volamp t0 = do
         sig <- atomically (tryReadTChan chan)
@@ -254,8 +278,6 @@ renderState state = do
     let padding = maximum [ length (rRole r) | r <- Map.keys (sActive state) ]
     mapM_ (putStrLn . renderRhythm timebase padding) (Map.keys (sActive state))
 
-    dietime <- readIORef timeToDie
-    when dietime $ putStrLn "Winding down..."
 
     hFlush stdout
 
@@ -271,11 +293,6 @@ renderRhythm timebase padding rhythm =
                                 | otherwise = "X"
     padString p s = take p (s ++ repeat ' ')
 
-whileM :: (Monad m) => m Bool -> m () -> m ()
-whileM condm action = do
-    r <- condm
-    when r (action >> whileM condm action)
-
 mainThread :: Kit -> Conns -> IO ()
 mainThread chkit conns = do
     stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Map.singleton 0 Scale.cMinorPentatonic }
@@ -286,49 +303,41 @@ mainThread chkit conns = do
         atomically $ do
             state' <- readTVar stateVar
             when (state == state') retry
+
     -- APC thread
-    whenMay (cAPC conns) $ \apcdevs -> void . forkIO . forever $ do
-        state <- atomically (readTVar stateVar)
-        events <- APC40.pollNotes apcdevs
-        let roles = [ role
-                    | coord <- events 
-                    , Just role <- pure (Map.lookup coord roleMap)
-                    ]
-        forM_ roles $ \role -> do
-            let rhythms = filter ((role ==) . rRole . fst) (Map.assocs (sActive state))
-            if null rhythms then
-                newRhythmReal (Just role) stateVar
-            else
-                forM_ (map (arMessageChan . snd) rhythms) $ \chan -> do
-                    atomically (writeTChan chan MsgTerm)
-        threadDelay 30000
+    whenMay (cAPC conns) $ \apcdevs -> do
+        ghostMap <- traverse (\_ -> newTVarIO GhostNone) roleMap
+        
+        void . forkIO . forever $ do
+            state <- atomically (readTVar stateVar)
+            events <- APC40.pollNotes apcdevs
+            forM_ events $ \coord -> do
+                whenMay (Map.lookup coord ghostMap) $ \ghostVar -> do
+                    join . atomically $ readTVar ghostVar >>= \case
+                        GhostNone -> do
+                            writeTVar ghostVar (GhostKey coord)
+                            return . void . forkIO $ do
+                                threadDelay (1000 * inputAccuracy)
+                                atomically $ writeTVar ghostVar GhostNone
+                        GhostKey _ -> return $ return ()
+                        GhostNote note -> do
+                            -- XXX minimumGrid is not correct
+                            -- Bundle timing with GhostNote constructor
+                            return $ playNoteNow conns stateVar minimumGrid note
+            threadDelay 10000
                 
     -- song evolution thread:
-    whileM (liftA2 (||) (not <$> readIORef timeToDie) 
-                        (not . null . sActive <$> atomically (readTVar stateVar))) $ do
-        {-
-        makeChange stateVar
+    forever $ do
+        newRhythm Nothing stateVar
         state <- atomically $ readTVar stateVar
         now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
         let period = findPeriod (Map.keys (sActive state))
         let next = quantize period (now + fromIntegral modTime) - 200   -- make modification slightly before beginning of phrase
           -- so thread has time to start on time (& maybe even pickup)
         waitTill (cMainConn conns) next
-        -}
-        threadDelay 1000000
     
   where
-  makeChange stateVar = do
-    voices <- fromIntegral . length . sActive <$> atomically (readTVar stateVar)
-    id =<< evalRandIO (weighted [ 
-        (newRhythm stateVar, fromIntegral averageVoices), 
-        (sendRandMessage MsgTerm stateVar, voices) ])
-
-  newRhythm stateVar = do
-    dietime <- readIORef timeToDie
-    if dietime then sendRandMessage MsgTerm stateVar else newRhythmReal Nothing stateVar
-
-  newRhythmReal mayrole stateVar = void . forkIO $ do
+  newRhythm mayrole stateVar = void . forkIO $ do
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
     now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
     ret <- evalRandIO $ do
@@ -340,12 +349,6 @@ mainThread chkit conns = do
         Just (state', r) -> do
             atomically (writeTVar stateVar state')
             rhythmMain conns stateVar r
-
-  sendRandMessage sig stateVar = do
-    state <- atomically (readTVar stateVar)
-    evalRandIO (uniformMay (sActive state)) >>= \case
-        Nothing -> return ()
-        Just record -> atomically $ writeTChan (arMessageChan record) sig
 
 
 type Cloud = Rand StdGen
@@ -602,17 +605,7 @@ roleMap = Map.fromList
     , (2,4) --> "glitch.click"
     ]
 
-timeToDie :: IORef Bool
-timeToDie = unsafePerformIO $ newIORef False
-
 main :: IO ()
 main = do
-    !conns <- openConns
-    void $ installHandler sigINT (Catch onInt) Nothing
+    conns <- openConns
     mainThread myKit conns
-    where
-    onInt = do
-        dietime <- readIORef timeToDie
-        if dietime
-            then raiseSignal sigTERM
-            else writeIORef timeToDie True
