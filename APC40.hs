@@ -33,7 +33,7 @@ openDevs = do
 
             MIDI.sendSysEx destconn [
                 0x47, 0x7f, 0x29, 0x60, 0x00, 0x04,
-                0x40 + 0x00,     -- Generic Mode
+                0x40 + 0x02,     -- Ableton Live mode 2 (all changes must be sent over midi)
                 0x00, 0x00, 0x00
               ]
 
@@ -48,8 +48,8 @@ pollNotes devs = do
                    , Just coord <- pure (noteToCoord note)
                    ]
 
-lightOn :: Int -> Int -> Int -> Devs -> IO ()
-lightOn x y vel devs = MIDI.send (dDest devs) $ MIDI.MidiMessage 1 (MIDI.NoteOn note vel)
+lightOn :: (Int, Int) -> Int -> Devs -> IO ()
+lightOn (x,y) vel devs = MIDI.send (dDest devs) $ MIDI.MidiMessage 1 (MIDI.NoteOn note vel)
     where
     note = coordToNote (x,y)
 

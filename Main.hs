@@ -87,7 +87,7 @@ data Instrument = Instrument
     , iModulate :: Bool
     } 
 
-data APCCoord = APCCoord Int Int APC40.RGB | NoCoord
+data APCCoord = APCCoord (Int,Int) APC40.RGB | NoCoord
     deriving (Eq, Ord, Show)
 
 rgbMagToVel :: APC40.RGB -> Double -> Int
@@ -101,8 +101,7 @@ data Rhythm = Rhythm {
     rRole :: String,
     rTiming :: Rational,
     rNotes :: [Note],
-    rAltNotes :: [Note],  -- played as a pickup to phrase alignment
-    rModulate :: Bool
+    rAltNotes :: [Note]  -- played as a pickup to phrase alignment
     }
     deriving (Eq, Ord, Show)
 
@@ -121,6 +120,7 @@ type Kit = Map.Map String Instrument
 
 data Message 
     = MsgTerm
+    | MsgGhost
     deriving Show
 
 whenMay :: (Monad m) => Maybe a -> (a -> m ()) -> m ()
@@ -129,7 +129,7 @@ whenMay m f = maybe (return ()) f m
 -- A GhostEntry records whether an apc key was pressed recently enough to
 -- warrant playing the note, and also whether a note was triggered recently
 -- enough to play when the apc key is pressed.
-data GhostEntry = GhostNone | GhostNote Note | GhostKey (Int,Int)
+data GhostEntry = GhostNone | GhostNote Note | GhostKey
 
 type GhostMap = Map.Map (Int,Int) (TVar GhostEntry)
 
@@ -162,11 +162,11 @@ playNoteNow conns stateVar timing (Note ch pitch vel dur coord) = do
     conn = cMainConn conns
 
     apcCommands :: APCCoord -> IO (IO (), IO ())
-    apcCommands (APCCoord x y color) = do
+    apcCommands (APCCoord coord color) = do
         case cAPC conns of
             Nothing -> return () // return ()
-            Just apc -> APC40.lightOn x y (rgbMagToVel color (fromIntegral vel / 127)) apc
-                        // APC40.lightOn x y 0 apc
+            Just apc -> APC40.lightOn coord (rgbMagToVel color (fromIntegral vel / 127)) apc
+                        // APC40.lightOn coord 0 apc
     apcCommands NoCoord = return () // return ()
 
     pitchToMIDI :: Pitch -> IO (IO (), IO ())
@@ -192,54 +192,65 @@ playNoteNow conns stateVar timing (Note ch pitch vel dur coord) = do
         // atomically (modifyTVar stateVar 
             (\s -> s { sKey = Map.delete vel (sKey s) }))
     
+playGhostNote :: GhostMap -> Conns -> TVar State -> Rational -> Note -> IO ()
+playGhostNote ghostMap conns stateVar timing note@(Note _ch _pitch _vel _dur (APCCoord coord _color)) = do
+    whenMay (Map.lookup coord ghostMap) $ \tvar -> do
+        join . atomically $ readTVar tvar >>= \case
+            GhostNone -> do
+                writeTVar tvar (GhostNote note)
+                return . void . forkIO $ do
+                    threadDelay (1000*inputAccuracy)
+                    atomically $ writeTVar tvar GhostNone
+            GhostKey -> return $ playNoteNow conns stateVar timing note
+            GhostNote _ -> return $ do
+                -- Theoretically shouldn't happen
+                putStrLn "Double ghost! Boo!"
+playGhostNote _ _ _ _ _ = return ()
 
-rhythmThread :: TVar State -> Conns -> TChan Message -> Rhythm -> IO ()
-rhythmThread stateVar conns chan rhythm = do
+rhythmThread :: GhostMap -> TVar State -> Conns -> TChan Message -> Rhythm -> IO ()
+rhythmThread ghostmap stateVar conns chan rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = quantize (timeLength rhythm) now
     -- volume modulation
-    volperiod <- evalRandIO $ getRandomR (5000.0,20000.0)
-    volamp <- evalRandIO $ getRandomR (0.01, 0.99)
-    go volperiod volamp starttime
+    go starttime
 
     where
     timing = rTiming rhythm
     conn = cMainConn conns
 
-    playNote :: Double -> Time -> Note -> IO ()
-    playNote vmod t note = do
+    playNote :: Time -> Note -> IO ()
+    playNote t note = do
         waitTill conn t
-        --let vel' | rModulate rhythm = round (fromIntegral vel * vmod)
-        --         | otherwise = vel
-        --when (vel' > 0) $ 
         playNoteNow conns stateVar timing note
 
+    playGhost :: Time -> Note -> IO ()
+    playGhost t note = do
+        waitTill conn t
+        playGhostNote ghostmap conns stateVar timing note
 
-    playPhrase volperiod volamp t0 notes = do
+    playPhrase player t0 notes = do
         let times = [t0, t0 + timing ..]
         let !ret = last (zipWith const times (notes ++ [error "too clever"]))
-        forM_ (zip times notes) $ \(t, note) -> 
-            let velmod = 0.5 * (1 + sin (realToFrac t / volperiod)) * volamp
-            in playNote (1-velmod) t note
+        forM_ (zip times notes) $ \(t, note) -> player t note
         return ret
 
-    chooseAndPlayPhrase volperiod volamp t0 = do
+    chooseAndPlayPhrase player t0 = do
         state <- atomically $ readTVar stateVar
         let end = t0 + timeLength rhythm
         let period = findPeriod (Map.keys (sActive state))
         if end == quantize period end && period /= timeLength rhythm
             then
-                playPhrase volperiod volamp t0 (rAltNotes rhythm)
+                playPhrase player t0 (rAltNotes rhythm)
             else
-                playPhrase volperiod volamp t0 (rNotes rhythm)
+                playPhrase player t0 (rNotes rhythm)
 
-    go :: Double -> Double -> Rational -> IO ()
-    go volperiod volamp t0 = do
+    go :: Rational -> IO ()
+    go t0 = do
         sig <- atomically (tryReadTChan chan)
         case sig of
-            Nothing -> chooseAndPlayPhrase volperiod volamp t0 >>= go volperiod volamp
-            Just MsgTerm -> --fadePhrase t0
-                            return ()
+            Nothing -> chooseAndPlayPhrase playNote t0 >>= go
+            Just MsgTerm -> return ()
+            Just MsgGhost -> chooseAndPlayPhrase playGhost t0 >>= go
              
 quantize :: Rational -> Rational -> Rational
 quantize grid x = fromIntegral (ceiling (x / grid)) * grid
@@ -249,8 +260,8 @@ waitTill conn target = do
     now <- fromIntegral <$> MIDI.currentTime conn
     threadDelay (floor (1000 * (target - now)))
 
-rhythmMain :: Conns -> TVar State -> Rhythm -> IO ()
-rhythmMain conns stateVar rhythm = do
+rhythmMain :: GhostMap -> Conns -> TVar State -> Rhythm -> IO ()
+rhythmMain ghostmap conns stateVar rhythm = do
     join . atomically $ do
         state <- readTVar stateVar
         if rhythm `Map.member` sActive state then
@@ -260,7 +271,7 @@ rhythmMain conns stateVar rhythm = do
             writeTVar stateVar $ state { sActive = Map.insert rhythm (ActiveRecord chan) (sActive state)
                                        , sInactive = Map.delete rhythm (sInactive state) }
             return $ do
-                rhythmThread stateVar conns chan rhythm
+                rhythmThread ghostmap stateVar conns chan rhythm
                 now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
                 atomically . modifyTVar stateVar $ \s -> s { sActive = Map.delete rhythm (sActive s)
                                                            , sInactive = Map.insert rhythm (InactiveRecord now) (sInactive s) }
@@ -305,39 +316,44 @@ mainThread chkit conns = do
             when (state == state') retry
 
     -- APC thread
+    ghostMap <- traverse (\_ -> newTVarIO GhostNone) roleMap
     whenMay (cAPC conns) $ \apcdevs -> do
-        ghostMap <- traverse (\_ -> newTVarIO GhostNone) roleMap
-        
         void . forkIO . forever $ do
             state <- atomically (readTVar stateVar)
             events <- APC40.pollNotes apcdevs
             forM_ events $ \coord -> do
+                whenMay (Map.lookup coord roleMap) $ \role -> do
+                    sequence_ $ do
+                        (k,ar) <- Map.assocs (sActive state)
+                        guard (rRole k == role)
+                        return . atomically $ writeTChan (arMessageChan ar) MsgGhost
                 whenMay (Map.lookup coord ghostMap) $ \ghostVar -> do
                     join . atomically $ readTVar ghostVar >>= \case
                         GhostNone -> do
-                            writeTVar ghostVar (GhostKey coord)
+                            writeTVar ghostVar GhostKey
                             return . void . forkIO $ do
                                 threadDelay (1000 * inputAccuracy)
                                 atomically $ writeTVar ghostVar GhostNone
-                        GhostKey _ -> return $ return ()
+                        GhostKey -> return $ return ()
                         GhostNote note -> do
                             -- XXX minimumGrid is not correct
                             -- Bundle timing with GhostNote constructor
-                            return $ playNoteNow conns stateVar minimumGrid note
+                            return . void . forkIO $ playNoteNow conns stateVar minimumGrid note
             threadDelay 10000
                 
     -- song evolution thread:
     forever $ do
-        newRhythm Nothing stateVar
+        newRhythm ghostMap Nothing stateVar
         state <- atomically $ readTVar stateVar
         now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
         let period = findPeriod (Map.keys (sActive state))
-        let next = quantize period (now + fromIntegral modTime) - 200   -- make modification slightly before beginning of phrase
+        let next = quantize period (now + fromIntegral modTime) - 200
+          -- make modification slightly before beginning of phrase
           -- so thread has time to start on time (& maybe even pickup)
         waitTill (cMainConn conns) next
     
   where
-  newRhythm mayrole stateVar = void . forkIO $ do
+  newRhythm ghostmap mayrole stateVar = void . forkIO $ do
     state <- atomically (readTVar stateVar)  -- XXX another race condition, could make two incompatible rhythms
     now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
     ret <- evalRandIO $ do
@@ -348,7 +364,7 @@ mainThread chkit conns = do
         Nothing -> return()
         Just (state', r) -> do
             atomically (writeTVar stateVar state')
-            rhythmMain conns stateVar r
+            rhythmMain ghostmap conns stateVar r
 
 
 type Cloud = Rand StdGen
@@ -371,7 +387,6 @@ makeRhythmRole chkit role timing numNotes = do
         , rNotes = notes
         , rPeriodExempt = iPeriodExempt (chkit Map.! role)
         , rAltNotes = altNotes
-        , rModulate = iModulate (chkit Map.! role)
         }
 
 makeRhythm :: Kit -> Rational -> Int -> Cloud Rhythm
@@ -560,20 +575,20 @@ chordKit = Map.fromList [
 
 studioDrummerKit :: Kit
 studioDrummerKit = Map.fromList [
-  "kick"  --> perc (APCCoord 1 1 (0,0,1)) [36],
-  "snare" --> perc (APCCoord 1 2 (1,1,0)) [37, 38, 39, 40],
-  "hat"   --> perc (APCCoord 1 3 (0,1,0)) [42, 44, 46],
-  "tom"   --> perc (APCCoord 1 4 (1,0,0)) [41, 43, 45, 47],
-  "ride"  --> perc (APCCoord 1 5 (1,0,1)) [50, 53]
+  "kick"  --> perc (APCCoord (1,1) (0,0,1)) [36],
+  "snare" --> perc (APCCoord (1,2) (1,1,0)) [37, 38, 39, 40],
+  "hat"   --> perc (APCCoord (1,3) (0,1,0)) [42, 44, 46],
+  "tom"   --> perc (APCCoord (1,4) (1,0,0)) [41, 43, 45, 47],
+  "ride"  --> perc (APCCoord (1,5) (1,0,1)) [50, 53]
   ]
 
 glitchKit :: Kit
 glitchKit = Map.fromList [
-    "kick"  --> perc (APCCoord 2 1 (0,0,1)) [36,37,48,49,60,61,72,73],
-    "snare" --> perc (APCCoord 2 2 (1,1,0)) [38,40,50,52,62,64,74,76],
-    "hat"   --> perc (APCCoord 2 3 (0,1,0)) [44,46,58],
-    "click" --> perc (APCCoord 2 4 (0,1,1)) [39,41,42,43,53,54,56,57,59
-                                            ,69,77,78,79,81,83,84,86,89]
+    "kick"  --> perc (APCCoord (2,1) (0,0,1)) [36,37,48,49,60,61,72,73],
+    "snare" --> perc (APCCoord (2,2) (1,1,0)) [38,40,50,52,62,64,74,76],
+    "hat"   --> perc (APCCoord (2,3) (0,1,0)) [44,46,58],
+    "click" --> perc (APCCoord (2,4) (0,1,1)) [39,41,42,43,53,54,56,57,59
+                                              ,69,77,78,79,81,83,84,86,89]
     ]
 
 makeKit :: [(String, Int, Kit)] -> Kit
