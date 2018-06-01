@@ -33,6 +33,9 @@ modTime = 10000
 inputAccuracy :: Int
 inputAccuracy = 50
 
+happyLightsTiming :: Int
+happyLightsTiming = 100
+
 -- END TWEAKS --
 
 data Conns = Conns {
@@ -51,7 +54,10 @@ openConns = Conns <$> openConn <*> APC40.openDevs
 
 type Time = Rational  -- millisecs
 
-data ActiveRecord = ActiveRecord { arMessageChan :: TChan Message }
+data ActiveRecord = ActiveRecord {
+    arMessageChan :: TChan Message,
+    arGhostCount :: TVar Int
+    } 
     deriving (Eq)
 
 data InactiveRecord = InactiveRecord { irLastKillTime :: Time }
@@ -120,7 +126,6 @@ type Kit = Map.Map String Instrument
 
 data Message 
     = MsgTerm
-    | MsgGhost
     deriving Show
 
 whenMay :: (Monad m) => Maybe a -> (a -> m ()) -> m ()
@@ -207,8 +212,8 @@ playGhostNote ghostMap conns stateVar timing note@(Note _ch _pitch _vel _dur (AP
                 putStrLn "Double ghost! Boo!"
 playGhostNote _ _ _ _ _ = return ()
 
-rhythmThread :: GhostMap -> TVar State -> Conns -> TChan Message -> Rhythm -> IO ()
-rhythmThread ghostmap stateVar conns chan rhythm = do
+rhythmThread :: GhostMap -> TVar State -> Conns -> ActiveRecord -> Rhythm -> IO ()
+rhythmThread ghostmap stateVar conns activerecord rhythm = do
     now <- fromIntegral <$> MIDI.currentTime conn
     let starttime = quantize (timeLength rhythm) now
     -- volume modulation
@@ -219,38 +224,54 @@ rhythmThread ghostmap stateVar conns chan rhythm = do
     conn = cMainConn conns
 
     playNote :: Time -> Note -> IO ()
+    playNote _ (Note _ _ 0 _ _) = return () 
     playNote t note = do
         waitTill conn t
-        playNoteNow conns stateVar timing note
+        join . atomically $ do
+            count <- readTVar (arGhostCount activerecord)
+            if | count <= 0 -> do
+                return $ playNoteNow conns stateVar timing note
+               | count == 1 -> do
+                    writeTVar (arGhostCount activerecord) (-1)
+                    return $ do
+                        playGhostNote ghostmap conns stateVar timing note
+                        void . forkIO $ do
+                            makeHappyLights note
+                            atomically $ writeTVar (arGhostCount activerecord) 0
+                | count > 1 -> do
+                    writeTVar (arGhostCount activerecord) (count-1)
+                    return $ playGhostNote ghostmap conns stateVar timing note
 
-    playGhost :: Time -> Note -> IO ()
-    playGhost t note = do
-        waitTill conn t
-        playGhostNote ghostmap conns stateVar timing note
+    makeHappyLights (Note _ _ _ _ (APCCoord coord _)) = do
+        whenMay (cAPC conns) $ \apc -> replicateM_ 8 $ do
+            APC40.lightOn coord 122 apc
+            threadDelay (1000 * happyLightsTiming)
+            APC40.lightOn coord 0 apc
+            threadDelay (1000 * happyLightsTiming)
+    makeHappyLights _ = return ()
 
-    playPhrase player t0 notes = do
+    playPhrase t0 notes = do
         let times = [t0, t0 + timing ..]
         let !ret = last (zipWith const times (notes ++ [error "too clever"]))
-        forM_ (zip times notes) $ \(t, note) -> player t note
+        forM_ (zip times notes) $ \(t, note) -> playNote t note
         return ret
 
-    chooseAndPlayPhrase player t0 = do
+    chooseAndPlayPhrase t0 = do
         state <- atomically $ readTVar stateVar
         let end = t0 + timeLength rhythm
         let period = findPeriod (Map.keys (sActive state))
         if end == quantize period end && period /= timeLength rhythm
             then
-                playPhrase player t0 (rAltNotes rhythm)
+                playPhrase t0 (rAltNotes rhythm)
             else
-                playPhrase player t0 (rNotes rhythm)
+                playPhrase t0 (rNotes rhythm)
 
     go :: Rational -> IO ()
     go t0 = do
-        sig <- atomically (tryReadTChan chan)
+        sig <- atomically (tryReadTChan (arMessageChan activerecord))
         case sig of
-            Nothing -> chooseAndPlayPhrase playNote t0 >>= go
+            Nothing -> chooseAndPlayPhrase t0 >>= go
             Just MsgTerm -> return ()
-            Just MsgGhost -> chooseAndPlayPhrase playGhost t0 >>= go
              
 quantize :: Rational -> Rational -> Rational
 quantize grid x = fromIntegral (ceiling (x / grid)) * grid
@@ -267,11 +288,11 @@ rhythmMain ghostmap conns stateVar rhythm = do
         if rhythm `Map.member` sActive state then
             return $ return ()
         else do
-            chan <- newTChan
-            writeTVar stateVar $ state { sActive = Map.insert rhythm (ActiveRecord chan) (sActive state)
+            activerecord <- ActiveRecord <$> newTChan <*> newTVar 0
+            writeTVar stateVar $ state { sActive = Map.insert rhythm activerecord (sActive state)
                                        , sInactive = Map.delete rhythm (sInactive state) }
             return $ do
-                rhythmThread ghostmap stateVar conns chan rhythm
+                rhythmThread ghostmap stateVar conns activerecord rhythm
                 now <- fromIntegral <$> MIDI.currentTime (cMainConn conns)
                 atomically . modifyTVar stateVar $ \s -> s { sActive = Map.delete rhythm (sActive s)
                                                            , sInactive = Map.insert rhythm (InactiveRecord now) (sInactive s) }
@@ -326,7 +347,9 @@ mainThread chkit conns = do
                     sequence_ $ do
                         (k,ar) <- Map.assocs (sActive state)
                         guard (rRole k == role)
-                        return . atomically $ writeTChan (arMessageChan ar) MsgGhost
+                        return . atomically $ do
+                            count <- readTVar (arGhostCount ar)
+                            when (count == 0) $ writeTVar (arGhostCount ar) 10
                 whenMay (Map.lookup coord ghostMap) $ \ghostVar -> do
                     join . atomically $ readTVar ghostVar >>= \case
                         GhostNone -> do
