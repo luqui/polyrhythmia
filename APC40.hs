@@ -70,8 +70,8 @@ rgbToVel rgb = snd $ minimumBy (compare `on` (distance2 rgb . fst)) rgbTable
 
 rgbTable :: [((Double, Double, Double), Int)]
 rgbTable = map (first toRGB)
-    [ (0x000000, 0)
-    , (0x1E1E1E, 1)
+    [ --(0x000000, 0)
+      (0x1E1E1E, 1)
     , (0x7F7F7F, 2)
     , (0xFFFFFF, 3)
     , (0xFF4C4C, 4)
