@@ -7,7 +7,7 @@ import qualified Data.IORef as IORef
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified System.MIDI as MIDI
-import Control.Concurrent (threadDelay, forkIO, ThreadId)
+import Control.Concurrent (threadDelay, forkIO)
 import Control.Monad (filterM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent.STM (STM, TVar)
@@ -24,6 +24,7 @@ import Control.Monad.Trans.Reader
 
 import qualified APC40
 import qualified Scale
+import IOLike
 
 -- TWEAKS --
 minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
@@ -104,55 +105,11 @@ data Env = Env {
 
 type PolyT = ReaderT Env
 
-class (Monad m) => MonadFork m where
-    forkM :: m () -> m ThreadId
 
-instance MonadFork IO where forkM = forkIO
-instance (MonadFork m) => MonadFork (ReaderT r m) where
-    forkM m = ReaderT $ forkM . runReaderT m
-
-forkM_ :: (MonadFork m) => m () -> m ()
-forkM_ = void . forkM
-
-
-class (Monad m) => MonadVars m where
-    newVar :: a -> m (TVar a)
-    readVar :: TVar a -> m a
-    writeVar :: TVar a -> a -> m ()
-    modifyVar :: TVar a -> (a -> a) -> m ()
-
-instance MonadVars IO where
-    newVar = STM.newTVarIO
-    readVar = STM.atomically . STM.readTVar
-    writeVar v = STM.atomically . STM.writeTVar v
-    modifyVar v = STM.atomically . STM.modifyTVar v
-
-instance MonadVars STM where
-    newVar = STM.newTVar
-    readVar = STM.readTVar
-    writeVar = STM.writeTVar
-    modifyVar = STM.modifyTVar
-
-instance (MonadVars m) => MonadVars (ReaderT r m) where
-    newVar = lift . newVar
-    readVar = lift . readVar
-    writeVar v = lift . writeVar v
-    modifyVar v = lift . modifyVar v
-
-instance (MonadVars m) => MonadVars (State.StateT s m) where
-    newVar = lift . newVar
-    readVar = lift . readVar
-    writeVar v = lift . writeVar v
-    modifyVar v = lift . modifyVar v
-
-
-atomicallyP :: PolyT STM a -> PolyT IO a
-atomicallyP m = ReaderT $ STM.atomically . runReaderT m
-
-getState :: (MonadVars m) => PolyT m State
+getState :: (MonadTVars m) => PolyT m State
 getState = readVar =<< asks eStateVar
 
-modifyState :: (MonadVars m) => (State -> State) -> PolyT m ()
+modifyState :: (MonadTVars m) => (State -> State) -> PolyT m ()
 modifyState f = flip modifyVar f =<< asks eStateVar
 
 data Pitch = Percussion Scale.MIDINote
@@ -271,12 +228,12 @@ playNoteNow timing (Note ch pitch vel dur coord) = do
         sendMIDI (MIDI.MidiMessage ch (MIDI.NoteOn n vel))
             // sendMIDI (MIDI.MidiMessage ch (MIDI.NoteOn n 0))
     pitchToMIDI (RootTonal range deg)  = do
-        key <- atomicallyP $ snd . Map.findMax . sKey <$> getState
+        key <- atomicallyT $ snd . Map.findMax . sKey <$> getState
         let note = Scale.apply key range deg
         sendMIDI (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
             // sendMIDI (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
     pitchToMIDI (ShiftTonal range deg)  = do
-        key <- atomicallyP $ snd . Map.findMax . sKey <$> getState
+        key <- atomicallyT $ snd . Map.findMax . sKey <$> getState
         let note = Scale.apply key range deg
         sendMIDI (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
             // sendMIDI (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
@@ -343,7 +300,7 @@ rhythmThread activerecord rhythm = do
                     return $ do
                         let win = fromIntegral (gcHits count) >= 0.75 * fromIntegral (gcTotal count)
                         when win $ State.modify (+1)
-                        lift . atomicallyP . modifyState $ \s -> s { sScore = sScore s + 1 }
+                        lift . atomicallyT . modifyState $ \s -> s { sScore = sScore s + 1 }
                         lift $ playGhostNote activerecord timing note
                         lift . forkM_ $ do
                             let color | win = 122
@@ -401,7 +358,7 @@ waitTill target = do
 
 rhythmMain :: Rhythm -> PolyT IO ()
 rhythmMain rhythm = do
-    join . atomicallyP $ do
+    join . atomicallyT $ do
         stateVar <- asks eStateVar
         state <- readVar stateVar
         if rhythm `Map.member` sActive state then
@@ -484,12 +441,12 @@ mainThread chkit conns = do
                         sequence_ $ do
                             (k,ar) <- Map.assocs (sActive state)
                             guard (rRole k == role)
-                            return . atomicallyP $ do
+                            return . atomicallyT $ do
                                 count <- readVar (arGhostCount ar)
                                 when (gcTotal count == 0) $ writeVar (arGhostCount ar) 
                                                         (GhostCount { gcTotal = 10, gcTries = 0, gcHits = 0 })
                     whenMay (Map.lookup coord ghostMap) $ \ghostVar -> do
-                        join . atomicallyP $ readVar ghostVar >>= \case
+                        join . atomicallyT $ readVar ghostVar >>= \case
                             GhostNone -> do
                                 writeVar ghostVar GhostKey
                                 return . forkM_ $ do
