@@ -21,12 +21,14 @@ import System.Posix.Signals (installHandler, Handler(..), sigINT, sigTERM, raise
 import qualified Scale
 
 -- TWEAKS --
-minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
-minimumGrid = 1000/16  -- 16th of a second
-maximumPeriod = 1000 * 10
-minimumNote = 1000/8
-maximumNote = 1000/2
-minimumChord = 2000
+timeScale, minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
+timeScale = 2
+minimumGrid = timeScale*1000/24  -- 24th of a second
+--maximumPeriod = timeScale*1000*10
+maximumPeriod = 16*2000  -- Verse period
+minimumNote = timeScale*1000/12
+maximumNote = timeScale*1000/2
+minimumChord = timeScale*2000
 maximumChord = maximumPeriod
 
 averageVoices :: Int
@@ -86,7 +88,8 @@ data Rhythm = Rhythm {
     rTiming :: Rational,
     rNotes :: [Note],
     rAltNotes :: [Note],  -- played as a pickup to phrase alignment
-    rModulate :: Bool
+    rModulate :: Bool,
+    rPinned :: Bool     -- don't ever remove this rhythm from the state
     }
     deriving (Eq, Ord, Show)
 
@@ -243,9 +246,12 @@ whileM condm action = do
     r <- condm
     when r (action >> whileM condm action)
 
-mainThread :: Kit -> MIDI.Connection -> IO ()
-mainThread chkit conn = do
-    stateVar <- newTVarIO $ State { sActive = Map.empty, sInactive = Map.empty, sKey = Map.singleton 0 Scale.cMinorPentatonic }
+emptyState :: State
+emptyState = State { sActive = Map.empty, sInactive = Map.empty, sKey = Map.singleton 0 Scale.cMinorPentatonic }
+
+mainThread :: Kit -> [Rhythm] -> MIDI.Connection -> IO ()
+mainThread chkit initRhythms conn = do
+    stateVar <- newTVarIO emptyState
     -- display thread
     void . forkIO . forever $ do
         state <- atomically (readTVar stateVar)
@@ -253,6 +259,7 @@ mainThread chkit conn = do
         atomically $ do
             state' <- readTVar stateVar
             when (state == state') retry
+    mapM_ (void . forkIO . rhythmMain conn stateVar) initRhythms
     -- song evolution thread:
     whileM (liftA2 (||) (not <$> readIORef timeToDie) 
                         (not . null . sActive <$> atomically (readTVar stateVar))) $ do
@@ -289,7 +296,7 @@ mainThread chkit conn = do
 
   sendRandMessage sig stateVar = do
     state <- atomically (readTVar stateVar)
-    evalRandIO (uniformMay (sActive state)) >>= \case
+    evalRandIO (uniformMay (Map.filterWithKey (\k _ -> not (rPinned k)) (sActive state))) >>= \case
         Nothing -> return ()
         Just record -> atomically $ writeTChan (arMessageChan record) sig
 
@@ -315,6 +322,7 @@ makeRhythmRole chkit role timing numNotes = do
         , rPeriodExempt = iPeriodExempt (chkit Map.! role)
         , rAltNotes = altNotes
         , rModulate = iModulate (chkit Map.! role)
+        , rPinned = False
         }
 
 makeRhythm :: Kit -> Rational -> Int -> Cloud Rhythm
@@ -428,7 +436,7 @@ chords scales = defaultInstrument
     , iMaxLength = maximumChord
     , iMinNotes = 1
     , iMaxNotes = 8
-    , iPeriodExempt = False
+    , iPeriodExempt = True
     , iModulate = False
     }
 
@@ -487,10 +495,12 @@ sAndBKit = Map.fromList [
 
 cMinorKit :: Kit
 cMinorKit = Map.fromList [
-    "bass" --> rootTonal (31,48)
-  , "mid"  --> shiftTonal (51,72)
-  , "high" --> shiftTonal (72,89)
-  --, "high-alt" --> [72,73,75,76,78,80,82,84,85,87,88]
+    "bass-root" --> rootTonal (31,48)
+  , "bass-mode" --> shiftTonal (31,48)
+  , "mid-root"  --> rootTonal (51,72)
+  , "mid-mode"  --> shiftTonal (51,72)
+  , "high-root" --> rootTonal (72,89)
+  , "high-mode" --> shiftTonal (72,89)
   , "pedal" --> pedal
   ]
 
@@ -515,6 +525,11 @@ glitchKit = Map.fromList [
                      ,69,77,78,79,81,83,84,86,89]
     ]
 
+ambientKit :: Kit
+ambientKit = Map.fromList [
+    "ambient" --> perc [1..63]
+    ]
+
 makeKit :: [(String, Int, Kit)] -> Kit
 makeKit kits = Map.unions 
     [ Map.mapKeysMonotonic ((name ++ ".") ++) . fmap (\i -> i { iChannel = ch }) $ kit 
@@ -527,9 +542,70 @@ myKit = makeKit [
     --, ("elec", 3, sAndBKit)
     , ("keys", 3, cMinorKit)
     , ("bass", 2, cMinorBassKit)
-    , ("chord", 0, chordKit)
-    , ("glitch", 1, glitchKit)
+    -- , ("chord", 0, chordKit)
+    --, ("glitch", 1, glitchKit)
+    -- ("ambient" ++ show n, n, ambientKit)
+    -- | n <- [1..6]
     ]
+
+upHat :: Rhythm
+upHat = Rhythm 
+    { rPeriodExempt = False
+    , rRole = "kit.hat"
+    , rTiming = 500
+    , rNotes = [ Note 4 (Percussion 44) 0 1
+               , Note 4 (Percussion 44) 72 1
+               , Note 4 (Percussion 44) 0 1
+               , Note 4 (Percussion 44) 72 1 ]
+    , rAltNotes = rNotes upHat
+    , rModulate = False
+    , rPinned = True
+    }
+
+mozartBass :: Rhythm
+mozartBass = Rhythm
+    { rPeriodExempt = False
+    , rRole = "bass.bass"
+    , rTiming = 500
+    , rNotes = [ Note 2 (RootTonal range 0) 68 1
+               , Note 2 (RootTonal range 4) 42 1
+               , Note 2 (RootTonal range 2) 56 1
+               , Note 2 (RootTonal range 4) 41 1 ]
+    , rAltNotes = rNotes mozartBass
+    , rModulate = True
+    , rPinned = True
+    }
+    where
+    range = (48,72)
+
+blueBossa :: Rhythm
+blueBossa = Rhythm
+    { rPeriodExempt = True
+    , rRole = "chord.chord"
+    , rTiming = 2000
+    , rNotes = [ Note 0 (GlobalScaleChange (Scale.transposeChr 0 Scale.cMinor)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 0 Scale.cMinor)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 5 Scale.cDorian)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 5 Scale.cDorian)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 2 Scale.cHalfDim)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 7 Scale.cDominant)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 0 Scale.cMinor)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 10 Scale.cDominant)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 3 Scale.cDorian)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 8 Scale.cDominant)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 1 Scale.cMajor)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 1 Scale.cMajor)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 2 Scale.cHalfDim)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 7 Scale.cDominant)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 0 Scale.cMinor)) 64 1
+               , Note 0 (GlobalScaleChange (Scale.transposeChr 7 Scale.cDominant)) 64 1
+               ]
+    , rAltNotes = rNotes blueBossa
+    , rModulate = False
+    , rPinned = True
+    }
+
+
 
 timeToDie :: IORef Bool
 timeToDie = unsafePerformIO $ newIORef False
@@ -539,7 +615,7 @@ main = do
     !conn <- openConn
     MIDI.start conn
     void $ installHandler sigINT (Catch onInt) Nothing
-    mainThread myKit conn
+    mainThread myKit [upHat, mozartBass, blueBossa] conn
     where
     onInt = do
         dietime <- readIORef timeToDie

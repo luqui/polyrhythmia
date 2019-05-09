@@ -5,7 +5,8 @@ module Scale (
     apply, applyShift,
     numNotes,
     transposeChr,
-    cMinorPentatonic, cMajor, cMinor
+    cMinorPentatonic, cMajor, cMinor,
+    cDorian, cHalfDim, cDominant
 ) where
 
 import Data.Ord (comparing)
@@ -78,5 +79,9 @@ cMinorPentatonic = Scale 0 [0,3,5,7,10]
 cMajor, cMinor :: Scale
 cMajor = Scale 0 [0,2,4,5,7,9,11]
 cMinor = Scale 0 [0,2,3,5,7,8,10]
+cDorian = Scale 0 [0,2,3,5,7,9,10]
+cHalfDim = Scale 0 [0,2,3,5,6,8,10]
+cDominant = Scale 0 [0,2,4,5,7,9,10]
+
 
 
