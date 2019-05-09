@@ -1,0 +1,23 @@
+So I have this idea to generate melodies based on a few seed ideas and a
+collection of combinators.  Ideally I would like to start genersting a few
+simple combinations of the seed ideas and then "listen" to the result for
+emergent patterns, which become new seeds to play with.  Simple example:
+
+    seed = C D E
+    pat1 = E F G                (diatonic transpose +2 seed)
+    seed |+| pat1 = C D E F G   (overlapping concatenation)
+
+Now we have a new pattern to work with, `seed |+| pat1` which was built out of
+the seed but is also its own thing.  I guess we haven't really read any patterns
+yet.   Maybe something more like
+
+    C D E D E F E F G
+    . . ^ . ^ . ^ . .
+
+We have "squared" the seed idea, and we see that there are three repeated `E`s,
+so maybe we could make a derived idea
+
+    derived = . . E . E . E . .
+
+or something like that.  This wouldn't be so hard except that we need some way
+to determine what counts as a "thing" to listen to. 
