@@ -22,17 +22,17 @@ import qualified Scale
 
 -- TWEAKS --
 timeScale, minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
-timeScale = 2
-minimumGrid = timeScale*1000/24  -- 24th of a second
+timeScale = 1.5
+minimumGrid = timeScale*1000/16  -- 24th of a second
 --maximumPeriod = timeScale*1000*10
-maximumPeriod = 16*2000  -- Verse period
-minimumNote = timeScale*1000/12
+maximumPeriod = 4*2000
+minimumNote = timeScale*1000/8
 maximumNote = timeScale*1000/2
 minimumChord = timeScale*2000
 maximumChord = maximumPeriod
 
 averageVoices :: Int
-averageVoices = 8
+averageVoices = 5
 
 modTime :: Int
 modTime = 4000
@@ -540,8 +540,8 @@ myKit = makeKit [
     ("kit", 4, studioDrummerKit)
     --, ("bell", 2, gamillionKit)
     --, ("elec", 3, sAndBKit)
-    , ("keys", 3, cMinorKit)
-    , ("bass", 2, cMinorBassKit)
+    --, ("keys", 3, cMinorKit)
+    -- , ("bass", 2, cMinorBassKit)
     -- , ("chord", 0, chordKit)
     --, ("glitch", 1, glitchKit)
     -- ("ambient" ++ show n, n, ambientKit)
@@ -552,7 +552,7 @@ upHat :: Rhythm
 upHat = Rhythm 
     { rPeriodExempt = False
     , rRole = "kit.hat"
-    , rTiming = 500
+    , rTiming = timeScale * 250
     , rNotes = [ Note 4 (Percussion 44) 0 1
                , Note 4 (Percussion 44) 72 1
                , Note 4 (Percussion 44) 0 1
@@ -566,11 +566,11 @@ mozartBass :: Rhythm
 mozartBass = Rhythm
     { rPeriodExempt = False
     , rRole = "bass.bass"
-    , rTiming = 500
-    , rNotes = [ Note 2 (RootTonal range 0) 68 1
-               , Note 2 (RootTonal range 4) 42 1
-               , Note 2 (RootTonal range 2) 56 1
-               , Note 2 (RootTonal range 4) 41 1 ]
+    , rTiming = timeScale * 250
+    , rNotes = [ Note 2 (RootTonal range 0) 88 1
+               , Note 2 (RootTonal range 4) 66 1
+               , Note 2 (RootTonal range 2) 77 1
+               , Note 2 (RootTonal range 4) 66 1 ]
     , rAltNotes = rNotes mozartBass
     , rModulate = True
     , rPinned = True
@@ -582,7 +582,7 @@ blueBossa :: Rhythm
 blueBossa = Rhythm
     { rPeriodExempt = True
     , rRole = "chord.chord"
-    , rTiming = 2000
+    , rTiming = timeScale * 1000
     , rNotes = [ Note 0 (GlobalScaleChange (Scale.transposeChr 0 Scale.cMinor)) 64 1
                , Note 0 (GlobalScaleChange (Scale.transposeChr 0 Scale.cMinor)) 64 1
                , Note 0 (GlobalScaleChange (Scale.transposeChr 5 Scale.cDorian)) 64 1
@@ -615,7 +615,7 @@ main = do
     !conn <- openConn
     MIDI.start conn
     void $ installHandler sigINT (Catch onInt) Nothing
-    mainThread myKit [upHat, mozartBass, blueBossa] conn
+    mainThread myKit [upHat] conn
     where
     onInt = do
         dietime <- readIORef timeToDie
