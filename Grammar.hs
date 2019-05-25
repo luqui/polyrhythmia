@@ -113,7 +113,7 @@ limit = 50000
 
 main :: IO ()
 main = do
-    barsize <- read . head <$> getArgs 
+    [tempo, barsize] <- map read <$> getArgs
 
     prods <- Rand.evalRandIO $ let ps = (:) <$> randomProduction <*> ps in ps
 
@@ -126,9 +126,10 @@ main = do
     conn <- openConn
     MIDI.start conn
 
+    let delay = 1/(4/60*fromIntegral tempo)
     let gotime ens = do
             ens' <- Rand.evalRandIO (genEnsemble barsize grammar)
-            par ((sum . map length) ens') $ void . replicateM 4 $ playSimple conn (1/6) . transpose $ ens
+            par ((sum . map length) ens') $ void . replicateM 4 $ playSimple conn delay . transpose $ ens
             gotime ens'
     gotime []
 
