@@ -22,7 +22,7 @@ import qualified Scale
 
 -- TWEAKS --
 timeScale, minimumGrid, maximumPeriod, minimumNote, maximumNote, minimumChord, maximumChord :: Rational
-timeScale = 1.5
+timeScale = 1.8
 minimumGrid = timeScale*1000/16  -- 24th of a second
 --maximumPeriod = timeScale*1000*10
 maximumPeriod = 4*2000

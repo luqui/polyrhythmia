@@ -98,10 +98,16 @@ example = Free.Free (aaba (Free.Free (aaba (Free.Pure 12))))
     aaba sub = fromLabels (Map.fromList [('A', sub), ('B', sub)]) "AABA"
 
 example2 :: PhraseTree Int
-example2 = Free.Free (aaaa (Free.Free (aaba (Free.Pure 64))))
+example2 = Free.Free (aaaa (Free.Free (aa (Free.Pure 24))))
     where
-    aaba sub = fromLabels (Map.fromList [('A', sub), ('B', sub)]) "AABA"
-    aaaa sub = fromLabels (Map.fromList [('A', sub)] ) "AAAA"
+    aa sub = fromLabels (Map.fromList [('A', sub)]) "AA"
+    aaaa sub = fromLabels (Map.fromList [('A', sub)]) "AAAA"
+
+example3 :: PhraseTree Int
+example3 = Free.Free (aaaa (Free.Free (aabc (Free.Pure 12))))
+    where
+    aabc sub = fromLabels (Map.fromList [('A', sub), ('B', sub), ('C', sub)]) "AABC"
+    aaaa sub = fromLabels (Map.fromList [('A', sub)]) "AAAA"
 
 
 data Note = Note Int Int Int -- ch, note, vel
@@ -121,13 +127,18 @@ main = do
     !conn <- openConn
     MIDI.start conn
 
-    msgs <- forM instrs $ \instr ->
-        let messages = Note 1 <$> instr <*> vels in
-        fmap flatten . Rand.evalRandIO . fmap join . sequenceA $ embellish1 messages <$> example
+    msgs <- forM instrs $ \instr -> do
+        let messages = Note 1 <$> instr <*> vels 
+        form <- Rand.evalRandIO $ Rand.uniform [example, example2, example3 ]
+        fmap flatten . Rand.evalRandIO . fmap join . sequenceA $ embellish1 messages <$> form
     playSimple conn (1/6) (transpose msgs)
     where
     instrs = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
-    vels = [0,0,0,0,0,0,32,64,96]
+    vels = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,48,64]
+    --instrs = [ [36], [50, 53] ]
+    
+    -- idea: spread out energy in a consistent way per instrument type.  Either
+    -- lots of low velocity notes, or a few strong ones.
 
 openConn :: IO MIDI.Connection
 openConn = MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") . MIDI.getName) =<< MIDI.enumerateDestinations 

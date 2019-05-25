@@ -21,3 +21,49 @@ so maybe we could make a derived idea
 
 or something like that.  This wouldn't be so hard except that we need some way
 to determine what counts as a "thing" to listen to. 
+
+
+-----
+
+Another idea, simpler:  a numeric grammar of rewrites, which are applied at all
+levels.  E.g.
+
+    a: 7 = 3 + 4
+    b: 2 = 1 + 1
+    c: 3 = 2 + 1
+
+    ..............  (14)
+    a[......][........]
+      ...... =
+        b[...][...]
+          ... =
+            c[..][.]
+              .. =
+                b[.][.]
+        c[....][..]
+          .... =
+            b[..][..]
+              .. = 
+                b[.][.]
+          .. = 
+            b[.][.]
+      ........ =
+        b[....][....]
+          .... =
+            b[..][..]
+              .. = 
+                b[.][.]
+
+    b[.......][.......]
+      ....... =
+        a[...][....]
+          ... =
+            c[..][.]
+              .. =
+                b[.][.]
+          .... =
+            b[..][..]
+              .. =
+                b[.][.]
+
+
