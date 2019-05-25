@@ -1,12 +1,14 @@
 {-# LANGUAGE MultiWayIf, DeriveFunctor #-}
 
 import Debug.Trace (trace)
+import Control.Parallel (par)
 import Control.Concurrent (threadDelay)
-import Control.Monad (ap, filterM, replicateM, forM_, forM, forever)
+import Control.Monad (ap, filterM, replicateM, forM_, forM, forever, void)
 import qualified Control.Monad.Random as Rand
 import Control.Applicative
-import Data.List (transpose)
+import Data.List (transpose, inits)
 import qualified System.MIDI as MIDI
+import System.Environment (getArgs)
 
 newtype Production a = Production { runProduction :: Int -> [a] }
     deriving (Functor)
@@ -51,23 +53,23 @@ type Cloud = Rand.Rand Rand.StdGen
 
 data Note = Note Int Int Int -- ch, note, vel
 
+type OpenGrammar = Production [Int] -> Production [Int]  -- Int is a strength
+type Grammar = Production [Int]
 
-randomGrammar :: Int -> Cloud (Production [Int])  -- Int is a strength
-randomGrammar nprods = do
-    prods <- replicateM nprods randProd
-    pure $ let r = choice (unit [0] : map ($ r) prods) in r
-    
-    where
-    randProd = do
-        m <- Rand.uniform [1..4]
-        n <- Rand.uniform [1..4]
-        trace (show m ++ " + " ++ show n) (pure ())
-        pure $ \rec -> fmap (preinc . uncurry (++)) (addP m n rec rec)
-
-    choice = foldr (<|>) empty
+randomProduction :: Cloud OpenGrammar
+randomProduction = do
+    m <- Rand.weighted [ (n, 1/fromIntegral n) | n <- [1..10] ]
+    n <- Rand.weighted [ (n, 1/fromIntegral n) | n <- [1..10] ]
+    trace (show m ++ " + " ++ show n) (pure ())
+    pure $ \rec -> fmap (preinc . uncurry (++)) (addP m n rec rec)
+    where 
     preinc [] = []
     preinc (n:xs) = (n+1):xs
 
+fixGrammar :: [OpenGrammar] -> Grammar
+fixGrammar prods = let r = choice (unit [0] : map ($ r) prods) in r
+    where
+    choice = foldr (<|>) empty
 
 
 playSimple :: MIDI.Connection -> Double -> [[Note]] -> IO ()
@@ -95,32 +97,41 @@ instruments = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
 genEnsemble :: Int -> Production [Int] -> Cloud [[Note]]
 genEnsemble barsize grammar = do
     forM instruments $ \instr -> do
-        bar <- Rand.uniform (runProduction grammar barsize)
+        let poss = take limit (runProduction grammar barsize)
+        bar <- Rand.uniform poss
+        trace ("possibilities " ++ show (length poss)) (pure ())
         trace (show bar) (pure ())
-        i <- Rand.uniform instr
-        let notebar = fmap (Note 1 i . min 127 . (*10)) bar
+        notes <- replicateM 12 (Rand.uniform instr)
+        let notebar = fmap (\strength -> Note 1 (notes !! (min strength 11)) (min 127 (strength * 10))) bar
         pure notebar
 
 cat :: [[a]] -> [[a]] -> [[a]]
 cat = zipWith (++)
 
+limit :: Int
+limit = 50000
+
 main :: IO ()
 main = do
-    grammar <- Rand.evalRandIO $ randomGrammar 8
+    barsize <- read . head <$> getArgs 
 
-    barsize <- Rand.evalRandIO $ head . filter (hasAtLeast 10 . runProduction grammar) <$> shuffle [16..48]
-    putStrLn $ "bar size " ++ show barsize
-    
+    prods <- Rand.evalRandIO $ let ps = (:) <$> randomProduction <*> ps in ps
+
+    let grammar = head [ fixGrammar ps
+                       | ps <- inits prods
+                       , let poss = length (take limit (runProduction (fixGrammar ps) barsize))
+                       , trace (show poss) (poss > 100)
+                       ]
+
     conn <- openConn
     MIDI.start conn
 
-    ensA <- Rand.evalRandIO $ genEnsemble barsize grammar
-    ensB <- Rand.evalRandIO $ genEnsemble barsize grammar
+    let gotime ens = do
+            ens' <- Rand.evalRandIO (genEnsemble barsize grammar)
+            par ((sum . map length) ens') $ void . replicateM 4 $ playSimple conn (1/6) . transpose $ ens
+            gotime ens'
+    gotime []
 
-    let piece = transpose (ensA `cat` ensA `cat` ensB `cat` ensA)
-
-
-    (sum . map length) piece `seq` (forever $ playSimple conn (1/6) piece)
     
 
 openConn :: IO MIDI.Connection
