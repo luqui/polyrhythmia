@@ -34,6 +34,9 @@ unit x = Production $ \s ->
     if | s == 1 -> [x]
        | otherwise -> []
 
+rotate :: Int -> [a] -> [a]
+rotate n xs = zipWith const (drop n (cycle xs)) xs
+
 data RTree = RTree String [RTree]
 
 instance Show RTree where
@@ -100,9 +103,10 @@ genEnsemble barsize grammar = do
         let poss = take limit (runProduction grammar barsize)
         bar <- Rand.uniform poss
         trace ("possibilities " ++ show (length poss)) (pure ())
-        trace (show bar) (pure ())
         notes <- replicateM 12 (Rand.uniform instr)
-        let notebar = fmap (\strength -> Note 1 (notes !! (min strength 11)) (min 127 (strength * 10))) bar
+        bar' <- rotate <$> Rand.uniform [0..barsize-1] <*> pure bar  -- disable rotations for less african sounding rhythms
+        trace (show bar') (pure ())
+        let notebar = fmap (\strength -> Note 1 (notes !! (min strength 11)) (min 127 (strength * 10))) bar'
         pure notebar
 
 cat :: [[a]] -> [[a]] -> [[a]]
