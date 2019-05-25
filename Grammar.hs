@@ -52,23 +52,21 @@ type Cloud = Rand.Rand Rand.StdGen
 data Note = Note Int Int Int -- ch, note, vel
 
 
-randomGrammar :: Int -> Int -> Cloud (Production [Int])  -- Int is an abstract label
-randomGrammar nprods labels = do
+randomGrammar :: Int -> Cloud (Production [Int])  -- Int is a strength
+randomGrammar nprods = do
     prods <- replicateM nprods randProd
-    u <- Rand.uniform [0..labels-1]
-    pure $ let r = choice (unit [u] : map ($ r) prods) in r
+    pure $ let r = choice (unit [0] : map ($ r) prods) in r
     
     where
     randProd = do
         m <- Rand.uniform [1..4]
         n <- Rand.uniform [1..4]
-        lab <- Rand.uniform [0..labels-1]
         trace (show m ++ " + " ++ show n) (pure ())
-        pure $ \rec -> fmap (prepend lab . uncurry (++)) (addP m n rec rec)
+        pure $ \rec -> fmap (preinc . uncurry (++)) (addP m n rec rec)
 
     choice = foldr (<|>) empty
-    prepend x [] = []
-    prepend x (_:xs) = x:xs
+    preinc [] = []
+    preinc (n:xs) = (n+1):xs
 
 
 
@@ -91,9 +89,24 @@ hasAtLeast 0 _ = True
 hasAtLeast _ [] = False
 hasAtLeast n (_:xs) = hasAtLeast (n-1) xs
 
+instruments :: [[Int]]
+instruments = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
+
+genEnsemble :: Int -> Production [Int] -> Cloud [[Note]]
+genEnsemble barsize grammar = do
+    forM instruments $ \instr -> do
+        bar <- Rand.uniform (runProduction grammar barsize)
+        trace (show bar) (pure ())
+        i <- Rand.uniform instr
+        let notebar = fmap (Note 1 i . min 127 . (*10)) bar
+        pure notebar
+
+cat :: [[a]] -> [[a]] -> [[a]]
+cat = zipWith (++)
+
 main :: IO ()
 main = do
-    grammar <- Rand.evalRandIO $ randomGrammar 5 (length vels * maximum (map length instrs))
+    grammar <- Rand.evalRandIO $ randomGrammar 8
 
     barsize <- Rand.evalRandIO $ head . filter (hasAtLeast 10 . runProduction grammar) <$> shuffle [16..48]
     putStrLn $ "bar size " ++ show barsize
@@ -101,15 +114,13 @@ main = do
     conn <- openConn
     MIDI.start conn
 
-    msgs <- forM instrs $ \instr -> do
-        bar <- Rand.evalRandIO $ Rand.uniform (take 10 (runProduction grammar barsize))
-        let notebar = fmap (cycle (Note 1 <$> instr <*> vels) !!) bar
-        pure notebar
+    ensA <- Rand.evalRandIO $ genEnsemble barsize grammar
+    ensB <- Rand.evalRandIO $ genEnsemble barsize grammar
 
-    forever $ playSimple conn (1/6) (transpose msgs)
-    where
-    instrs = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
-    vels = [0,32,48,64]
+    let piece = transpose (ensA `cat` ensA `cat` ensB `cat` ensA)
+
+
+    (sum . map length) piece `seq` (forever $ playSimple conn (1/6) piece)
     
 
 openConn :: IO MIDI.Connection
