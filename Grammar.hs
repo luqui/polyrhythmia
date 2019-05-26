@@ -111,7 +111,7 @@ instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit
     drumkit notes _ i = Note 1 (cycle notes !! i) (min 127 (i * 14))
 
     scaleBass scale 0 = Note 2 0 0
-    scaleBass scale i = Note 2 (scale !! p) (min 127 (i * 10 + 50))
+    scaleBass scale i = Note 2 (12 + (scale !! p)) (min 127 (i * 10 + 50))
         where
         p = max 0 (5 - i)
     
