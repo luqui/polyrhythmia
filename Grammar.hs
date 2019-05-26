@@ -101,12 +101,30 @@ hasAtLeast 0 _ = True
 hasAtLeast _ [] = False
 hasAtLeast n (_:xs) = hasAtLeast (n-1) xs
 
-instruments :: [[Int]]
-instruments = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
+type Instrument = Int -> Note
+
+instruments :: [Instrument]
+instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53], dminBass ]
+    where
+    drumkit notes i = Note 1 (cycle notes !! i) (min 127 (i * 14))
+    dminBass 0 = Note 2 0 0
+    dminBass i = Note 2 ([38, 38, 50, 45, 41] !! p) (min 127 (i * 10 + 50))
+        where
+        p = max 0 (5 - i)
 
 -- probability to rotate the accents of a line -- makes the rhythm a bit looser and more tapestry-like
 rotationProbability :: Rational
 rotationProbability = 0.4
+
+genRow :: Int -> Production [Int] -> Cloud [Int]
+genRow barsize grammar = do
+    let poss = take limit (runProduction grammar barsize)
+    bar <- Rand.uniform poss
+    rotate <$> join (Rand.weighted [ 
+                (pure 0, 1-rotationProbability), 
+                (Rand.uniform [0..barsize-1], rotationProbability) ])
+           <*> pure bar
+
 
 
 -- probability to generate a new, not yet heard bar, as a function of the number of different
@@ -117,11 +135,8 @@ noveltyProbability n = 1 / fromIntegral n
 genEnsemble :: Int -> Production [Int] -> Cloud ([([Int], [Note])])   -- returns the generating row and the rendered one.  (yuck, sorry)
 genEnsemble barsize grammar = do
     forM instruments $ \instr -> do
-        let poss = take limit (runProduction grammar barsize)
-        bar <- Rand.uniform poss
-        row <- rotate <$> join (Rand.weighted [ (pure 0, 1-rotationProbability), (Rand.uniform [0..barsize-1], rotationProbability) ]) <*> pure bar
-        notes <- replicateM 12 (Rand.uniform instr)
-        pure . (row,) $ fmap (\strength -> Note 1 (notes !! (min strength 11)) (min 127 (strength * 10))) row
+        row <- genRow barsize grammar
+        pure . (row,) $ fmap instr row
         
 showBar :: [Int] -> String
 showBar = ("|"++) . (++"|") . map tochar
@@ -192,3 +207,6 @@ main = do
 
 openConn :: IO MIDI.Connection
 openConn = MIDI.openDestination =<< fmap head . filterM (fmap (== "IAC Bus 1") . MIDI.getName) =<< MIDI.enumerateDestinations 
+
+
+
