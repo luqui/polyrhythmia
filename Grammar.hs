@@ -4,6 +4,7 @@ import Debug.Trace (trace)
 import Control.Concurrent (threadDelay)
 import Control.Monad (ap, filterM, replicateM, forM_, forM, forever, void, join)
 import qualified Control.Monad.Random as Rand
+import qualified Data.Map as Map
 import Control.Applicative
 import Data.List (transpose, inits)
 import Data.List.Split (splitOn)
@@ -101,16 +102,68 @@ hasAtLeast 0 _ = True
 hasAtLeast _ [] = False
 hasAtLeast n (_:xs) = hasAtLeast (n-1) xs
 
-type Instrument = Int -> Note
+-- beat -> strength (0-5) -> note
+type Instrument = Int -> Int -> Note
 
 instruments :: [Instrument]
-instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53], dminBass ]
+instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53], softlyBass ]
     where
-    drumkit notes i = Note 1 (cycle notes !! i) (min 127 (i * 14))
-    dminBass 0 = Note 2 0 0
-    dminBass i = Note 2 ([38, 38, 50, 45, 41] !! p) (min 127 (i * 10 + 50))
+    drumkit notes _ i = Note 1 (cycle notes !! i) (min 127 (i * 14))
+
+    scaleBass scale 0 = Note 2 0 0
+    scaleBass scale i = Note 2 (scale !! p) (min 127 (i * 10 + 50))
         where
         p = max 0 (5 - i)
+    
+    dmin     = [38, 38, 50, 45, 41]
+    ehalfdim = [40, 40, 52, 46, 43]
+    a7       = [45, 45, 50, 49, 43]
+    c7       = [48, 48, 53, 52, 46]
+    fmaj     = [41, 41, 53, 48, 45]
+    fsdim    = [42, 48, 54, 51, 45]
+    gmin     = [43, 43, 55, 50, 46]
+    gsdim    = [44, 50, 56, 53, 47]
+
+    softlyChart = [ dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, c7, c7
+                  , fmaj, fmaj, fmaj, fmaj
+                  , fsdim, fsdim, fsdim, fsdim
+                  , gmin, gmin, gsdim, gsdim
+                  , a7, a7, a7, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  , dmin, dmin, ehalfdim, a7
+                  ]
+
+    softlyBass beat = scaleBass (softlyChart !! ((beat `div` 4) `mod` length softlyChart))
+
+softlyBarForm = [ "A", "A", "A", "A"
+                , "A", "A", "A", "A"
+                , "B", "B", "B", "B"
+                , "A", "A", "A", "A"
+                ]
+
+genForm :: (Monad m, Ord a) => [a] -> m b -> m [b]
+genForm = go Map.empty
+    where
+    go _ [] _ = pure []
+    go mp (f:fs) gen
+        | Just x <- Map.lookup f mp = (x:) <$> go mp fs gen
+        | otherwise = do
+            x <- gen
+            (x:) <$> go (Map.insert f x mp) fs gen
+
+repeatM :: (Monad m) => m a -> m [a]
+repeatM m = do
+    x <- m
+    (x:) <$> repeatM m
 
 -- probability to rotate the accents of a line -- makes the rhythm a bit looser and more tapestry-like
 rotationProbability :: Rational
@@ -127,17 +180,12 @@ genRow barsize grammar = do
 
 
 
+
 -- probability to generate a new, not yet heard bar, as a function of the number of different
 -- ones we've heard so far
 noveltyProbability :: Int -> Rational
 noveltyProbability n = 1 / fromIntegral n
 
-genEnsemble :: Int -> Production [Int] -> Cloud ([([Int], [Note])])   -- returns the generating row and the rendered one.  (yuck, sorry)
-genEnsemble barsize grammar = do
-    forM instruments $ \instr -> do
-        row <- genRow barsize grammar
-        pure . (row,) $ fmap instr row
-        
 showBar :: [Int] -> String
 showBar = ("|"++) . (++"|") . map tochar
     where
@@ -188,20 +236,23 @@ main = do
     conn <- openConn
     MIDI.start conn
 
+
     let delay = 1/(4/60*fromIntegral tempo)
-    let gotime hist = do
-            (hist',ens) <- Rand.evalRandIO (join (Rand.weighted [ 
-                        ((hist,) <$> Rand.uniform hist, 1 - noveltyProbability (length hist)),
-                        ((\x -> (x:hist, x)) <$> genEnsemble barsize grammar, noveltyProbability (length hist))
-                    ]))
+    let gotime beat0 form = do
+            let thisbar = map (take barsize) form
+            let nextform = map (drop barsize) form
+
 
             clearScreen
             setCursorPosition 0 0
-            mapM_ (putStrLn . showBar . fst) ens
+            mapM_ (putStrLn . showBar) thisbar
 
-            void . replicateM 4 $ playSimple conn delay . transpose $ map snd ens
-            gotime hist'
-    gotime . (:[]) =<< Rand.evalRandIO (genEnsemble barsize grammar)
+            let ens = zipWith (\ins row -> zipWith ins [beat0..] row) instruments thisbar
+            playSimple conn delay . transpose $ ens
+            gotime (beat0 + barsize) nextform
+    
+    form0 <- forM instruments $ \_ -> Rand.evalRandIO $ concat.concat <$> repeatM (genForm softlyBarForm (genRow barsize grammar))
+    gotime 0 form0
 
     
 
