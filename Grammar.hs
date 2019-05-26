@@ -27,7 +27,8 @@ instance  Alternative Production where
 
 addP :: Int -> Int -> Production a -> Production b -> Production (a,b)
 addP m n p q = Production $ \s ->
-    if | (d,0) <- s `divMod` (m+n) -> (,) <$> runProduction p (m*d) <*> runProduction q (n*d)
+    if -- | s == m + n -> (,) <$> runProduction p m <*> runProduction q n
+       | (d,0) <- s `divMod` (m+n) -> (,) <$> runProduction p (m*d) <*> runProduction q (n*d)
        | otherwise -> []
 
 unit :: a -> Production a
@@ -76,7 +77,7 @@ production m n = \rec -> fmap (preinc . uncurry (++)) (addP m n rec rec)
     preinc (n:xs) = (n+1):xs
 
 fixGrammar :: [OpenGrammar] -> Grammar
-fixGrammar prods = let r = choice (fillUnit : map ($ r) prods) in r
+fixGrammar prods = let r = choice (unit [0] : map ($ r) prods) in r
     where
     choice = foldr (<|>) empty
 
@@ -105,7 +106,7 @@ instruments = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
 
 -- probability to rotate the accents of a line -- makes the rhythm a bit looser and more tapestry-like
 rotationProbability :: Rational
-rotationProbability = 0.5
+rotationProbability = 0
 
 
 -- probability to generate a new, not yet heard bar, as a function of the number of different
@@ -141,23 +142,33 @@ cat = zipWith (++)
 limit :: Int
 limit = 50000
 
+
+-- Require at least this many different phrasings to ensure variety
+minLimit :: Int
+minLimit = 100
+
 parseRule :: String -> (Int,Int)
 parseRule str = (read a, read b)
     where
     [a,b] = splitOn "+" str
 
+evolveGrammar :: Int -> [OpenGrammar] -> Cloud Grammar
+evolveGrammar barsize rules = do
+    let poss = length (take limit (runProduction (fixGrammar rules) barsize))
+    trace (show poss ++ " | " ++ show (length rules)) (pure ())
+    if | poss == limit -> do
+        n <- Rand.uniform [0..length rules-1]
+        evolveGrammar barsize (take n rules ++ drop (n+1) rules)
+       | poss < 100 -> do
+        newrule <- uncurry production <$> randomProduction
+        evolveGrammar barsize (newrule : rules) 
+       | otherwise -> pure (fixGrammar rules)
+
 main :: IO ()
 main = do
     (read -> tempo) : (read -> barsize) : (map parseRule -> rules) <- getArgs
 
-    prods <- map (uncurry production) . (rules ++) <$> Rand.evalRandIO (let ps = (:) <$> randomProduction <*> ps in ps)
-    --let prods = map (uncurry production) rules
-
-    let grammar = head [ fixGrammar ps
-                       | ps <- drop (length rules) (inits prods)
-                       , let poss = length (take limit (runProduction (fixGrammar ps) barsize))
-                       , trace ("phrasings: " ++ show poss) (poss > 100)
-                       ]
+    grammar <- Rand.evalRandIO $ evolveGrammar barsize (map (uncurry production) rules) 
 
     conn <- openConn
     MIDI.start conn
