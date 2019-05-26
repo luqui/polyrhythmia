@@ -106,7 +106,7 @@ instruments = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
 
 -- probability to rotate the accents of a line -- makes the rhythm a bit looser and more tapestry-like
 rotationProbability :: Rational
-rotationProbability = 0
+rotationProbability = 0.4
 
 
 -- probability to generate a new, not yet heard bar, as a function of the number of different
