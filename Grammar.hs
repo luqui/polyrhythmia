@@ -1,14 +1,15 @@
-{-# LANGUAGE MultiWayIf, DeriveFunctor #-}
+{-# LANGUAGE MultiWayIf, DeriveFunctor, TupleSections, ViewPatterns #-}
 
 import Debug.Trace (trace)
-import Control.Parallel (par)
 import Control.Concurrent (threadDelay)
-import Control.Monad (ap, filterM, replicateM, forM_, forM, forever, void)
+import Control.Monad (ap, filterM, replicateM, forM_, forM, forever, void, join)
 import qualified Control.Monad.Random as Rand
 import Control.Applicative
 import Data.List (transpose, inits)
+import Data.List.Split (splitOn)
 import qualified System.MIDI as MIDI
 import System.Environment (getArgs)
+import System.Console.ANSI (clearScreen, setCursorPosition)
 
 newtype Production a = Production { runProduction :: Int -> [a] }
     deriving (Functor)
@@ -33,6 +34,9 @@ unit :: a -> Production a
 unit x = Production $ \s -> 
     if | s == 1 -> [x]
        | otherwise -> []
+
+fillUnit :: Production [Int]
+fillUnit = Production $ \s -> [replicate s 0]
 
 rotate :: Int -> [a] -> [a]
 rotate n xs = zipWith const (drop n (cycle xs)) xs
@@ -59,18 +63,20 @@ data Note = Note Int Int Int -- ch, note, vel
 type OpenGrammar = Production [Int] -> Production [Int]  -- Int is a strength
 type Grammar = Production [Int]
 
-randomProduction :: Cloud OpenGrammar
+randomProduction :: Cloud (Int,Int)
 randomProduction = do
     m <- Rand.weighted [ (n, 1/fromIntegral n) | n <- [1..10] ]
     n <- Rand.weighted [ (n, 1/fromIntegral n) | n <- [1..10] ]
-    trace (show m ++ " + " ++ show n) (pure ())
-    pure $ \rec -> fmap (preinc . uncurry (++)) (addP m n rec rec)
-    where 
+    pure (m,n)
+
+production :: Int -> Int -> OpenGrammar
+production m n = \rec -> fmap (preinc . uncurry (++)) (addP m n rec rec)
+    where
     preinc [] = []
     preinc (n:xs) = (n+1):xs
 
 fixGrammar :: [OpenGrammar] -> Grammar
-fixGrammar prods = let r = choice (unit [0] : map ($ r) prods) in r
+fixGrammar prods = let r = choice (fillUnit : map ($ r) prods) in r
     where
     choice = foldr (<|>) empty
 
@@ -97,45 +103,79 @@ hasAtLeast n (_:xs) = hasAtLeast (n-1) xs
 instruments :: [[Int]]
 instruments = [ [36], [37,38,39,40], [42,44,46], [41,43,45,47], [50, 53] ]
 
-genEnsemble :: Int -> Production [Int] -> Cloud [[Note]]
+-- probability to rotate the accents of a line -- makes the rhythm a bit looser and more tapestry-like
+rotationProbability :: Rational
+rotationProbability = 0.5
+
+
+-- probability to generate a new, not yet heard bar, as a function of the number of different
+-- ones we've heard so far
+noveltyProbability :: Int -> Rational
+noveltyProbability n = 1 / fromIntegral n
+
+genEnsemble :: Int -> Production [Int] -> Cloud ([([Int], [Note])])   -- returns the generating row and the rendered one.  (yuck, sorry)
 genEnsemble barsize grammar = do
     forM instruments $ \instr -> do
         let poss = take limit (runProduction grammar barsize)
         bar <- Rand.uniform poss
-        trace ("possibilities " ++ show (length poss)) (pure ())
+        row <- rotate <$> join (Rand.weighted [ (pure 0, 1-rotationProbability), (Rand.uniform [0..barsize-1], rotationProbability) ]) <*> pure bar
         notes <- replicateM 12 (Rand.uniform instr)
-        bar' <- rotate <$> Rand.uniform [0..barsize-1] <*> pure bar  -- disable rotations for less african sounding rhythms
-        trace (show bar') (pure ())
-        let notebar = fmap (\strength -> Note 1 (notes !! (min strength 11)) (min 127 (strength * 10))) bar'
-        pure notebar
+        pure . (row,) $ fmap (\strength -> Note 1 (notes !! (min strength 11)) (min 127 (strength * 10))) row
+        
+showBar :: [Int] -> String
+showBar = ("|"++) . (++"|") . map tochar
+    where
+    tochar 0 = ' '
+    tochar 1 = '.'
+    tochar 2 = ','
+    tochar 3 = 'x'
+    tochar 4 = 'X'
+    tochar _ = '#'
 
 cat :: [[a]] -> [[a]] -> [[a]]
 cat = zipWith (++)
 
+-- sometimes way too many possibilities are generated and things slow down. Cut it off after we 
+-- have found this many phrasings.  (We take the first n of them -- so the order ends up mattering,
+-- I think it interferes with the variety and we should come up with a way to choose more fairly)
 limit :: Int
 limit = 50000
 
+parseRule :: String -> (Int,Int)
+parseRule str = (read a, read b)
+    where
+    [a,b] = splitOn "+" str
+
 main :: IO ()
 main = do
-    [tempo, barsize] <- map read <$> getArgs
+    (read -> tempo) : (read -> barsize) : (map parseRule -> rules) <- getArgs
 
-    prods <- Rand.evalRandIO $ let ps = (:) <$> randomProduction <*> ps in ps
+    prods <- map (uncurry production) . (rules ++) <$> Rand.evalRandIO (let ps = (:) <$> randomProduction <*> ps in ps)
+    --let prods = map (uncurry production) rules
 
     let grammar = head [ fixGrammar ps
-                       | ps <- inits prods
+                       | ps <- drop (length rules) (inits prods)
                        , let poss = length (take limit (runProduction (fixGrammar ps) barsize))
-                       , trace (show poss) (poss > 100)
+                       , trace ("phrasings: " ++ show poss) (poss > 100)
                        ]
 
     conn <- openConn
     MIDI.start conn
 
     let delay = 1/(4/60*fromIntegral tempo)
-    let gotime ens = do
-            ens' <- Rand.evalRandIO (genEnsemble barsize grammar)
-            par ((sum . map length) ens') $ void . replicateM 4 $ playSimple conn delay . transpose $ ens
-            gotime ens'
-    gotime []
+    let gotime hist = do
+            (hist',ens) <- Rand.evalRandIO (join (Rand.weighted [ 
+                        ((hist,) <$> Rand.uniform hist, 1 - noveltyProbability (length hist)),
+                        ((\x -> (x:hist, x)) <$> genEnsemble barsize grammar, noveltyProbability (length hist))
+                    ]))
+
+            clearScreen
+            setCursorPosition 0 0
+            mapM_ (putStrLn . showBar . fst) ens
+
+            void . replicateM 4 $ playSimple conn delay . transpose $ map snd ens
+            gotime hist'
+    gotime . (:[]) =<< Rand.evalRandIO (genEnsemble barsize grammar)
 
     
 
