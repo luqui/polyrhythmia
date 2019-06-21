@@ -1,5 +1,5 @@
-import Control.Concurrent (threadDelay)
-import Control.Monad (filterM, replicateM)
+import Control.Concurrent (threadDelay, forkIO)
+import Control.Monad (filterM, replicateM, void, forM_, forever)
 import Data.Fixed (mod')
 import Data.List (minimumBy, tails, sortBy)
 import Data.Ord (comparing, Down(..))
@@ -46,13 +46,18 @@ record (src, dest) = do
     log <- replicateM 100 waitNote
     putStrLn "Calculating autocorrelation"
     let autocorr = foldr (.) id 
-                       [ updateTree l (ts `mod'` l) (1/(velSensitivity*abs(vel-vel')+1)) 
+                       [ updateTree l (ts `mod'` l) (1/((velSensitivity*(vel-vel'))^2+1)) 
                        | ((ts,vel):es) <- tails log
                        , (ts',vel') <- es
                        , let l = abs (ts' - ts)
                        , tempolike l ]
                     RT.empty
-    mapM_ print . take 10 . sortBy (comparing (Down . snd)) $ RT.toList autocorr
+    forM_ (take 3 . sortBy (comparing (Down . snd)) $ RT.toList autocorr) $ \(bb,mag) -> do
+        let l = (RT.getUlx bb + RT.getBrx bb) / 2
+        let φ = (RT.getUly bb + RT.getBry bb) / 2
+        print (l, φ)
+        void . forkIO $ playPeriod (src,dest) l φ
+    forever $ threadDelay (10^6)
     where
 
     waitNote = do
@@ -66,6 +71,15 @@ record (src, dest) = do
     convts ts = fromIntegral ts * 0.001
 
     tempolike l = l > 0.5 && l < 4
+
+playPeriod :: Connections -> Double -> Double -> IO ()
+playPeriod (src, dest) l φ = do
+    t <- (0.001*).fromIntegral <$> MIDI.currentTime src
+    let waitt = l - ((t - φ) `mod'` l)
+    threadDelay (round (10^6 * waitt))
+    MIDI.send dest (MIDI.MidiMessage 1 (MIDI.NoteOn 42 75))
+    threadDelay 50000
+    playPeriod (src,dest) l φ
 
 getNextEvent :: Connections -> IO (Maybe (MIDI.MidiEvent))
 getNextEvent (src, dest) = do

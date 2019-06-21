@@ -1,4 +1,4 @@
-{-# LANGUAGE MultiWayIf, DeriveFunctor, TupleSections, ViewPatterns #-}
+{-# LANGUAGE MultiWayIf, DeriveFunctor, TupleSections, ViewPatterns, ScopedTypeVariables #-}
 
 import Debug.Trace (trace)
 import Control.Concurrent (threadDelay)
@@ -105,13 +105,15 @@ hasAtLeast n (_:xs) = hasAtLeast (n-1) xs
 -- beat -> strength (0-5) -> note
 type Instrument = Int -> Int -> Note
 
-instruments :: [Instrument]
-instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53], softlyBass ]
+instruments :: [Cloud Instrument]
+instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53] ]
     where
-    drumkit notes _ i = Note 1 (cycle notes !! i) (min 127 (i * 14))
+    drumkit notes = do
+        chosen <- replicateM 5 (Rand.uniform notes)
+        pure $ \_ i -> Note 1 (cycle chosen !! i) (if i == 0 then 0 else min 127 (i * 15 + 30))
 
-    scaleBass scale 0 = Note 2 0 0
-    scaleBass scale i = Note 2 (12 + (scale !! p)) (min 127 (i * 10 + 50))
+    scaleBass scale _ 0 = Note 2 0 0
+    scaleBass scale _ i = Note 2 (12 + (scale !! p)) (min 127 (i * 10 + 50))
         where
         p = max 0 (5 - i)
     
@@ -146,9 +148,42 @@ instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit
 
 softlyBarForm = [ "A", "A", "A", "A"
                 , "A", "A", "A", "A"
-                , "B", "B", "B", "B"
-                , "A", "A", "A", "A"
+                , "B", "B", "B", "C"
+                , "A", "A", "A", "D"
                 ]
+
+waveBarForm = [ "A", "A", "A", "A", "A", "B" 
+              , "A", "A", "A", "A", "A", "B"
+              , "C", "C", "C", "D"
+              , "A", "A", "A", "A", "A", "E"
+              ]
+
+giantStepsBarForm = [ "A", "A", "A", "A"
+                    , "A", "A", "A", "B"
+                    ]
+
+spainBarForm = [ "A", "A", "A", "A"
+               , "A", "A", "A", "A"
+               , "A", "A", "A", "B"
+               ]
+
+oldOneBarForm = [ "A", "A", "A", "A"
+                , "A", "A", "A", "A"
+                , "B", "B", "B", "B"
+                , "B", "C"
+                ]
+
+ipanemaBarForm = [ "A", "A", "A", "A"
+                 , "A", "A", "A", "A"
+                 , "B", "B", "B", "B"
+                 , "B", "B", "C", "C"
+                 , "A", "A", "A", "A"
+                 ]
+
+songForMyFatherBarForm = [ "A", "A", "A", "A"
+                         , "A", "A", "A", "A"
+                         , "B", "B", "B", "C"
+                         ]
 
 genForm :: (Monad m, Ord a) => [a] -> m b -> m [b]
 genForm = go Map.empty
@@ -159,11 +194,6 @@ genForm = go Map.empty
         | otherwise = do
             x <- gen
             (x:) <$> go (Map.insert f x mp) fs gen
-
-repeatM :: (Monad m) => m a -> m [a]
-repeatM m = do
-    x <- m
-    (x:) <$> repeatM m
 
 -- probability to rotate the accents of a line -- makes the rhythm a bit looser and more tapestry-like
 rotationProbability :: Rational
@@ -227,11 +257,17 @@ evolveGrammar barsize rules = do
         evolveGrammar barsize (newrule : rules) 
        | otherwise -> pure (fixGrammar rules)
 
+forkCloud :: Cloud a -> Cloud a
+forkCloud c = do
+    g <- Rand.getSplit
+    pure $ Rand.evalRand c g
+
 main :: IO ()
 main = do
     (read -> tempo) : (read -> barsize) : (map parseRule -> rules) <- getArgs
 
     grammar <- Rand.evalRandIO $ evolveGrammar barsize (map (uncurry production) rules) 
+    --let grammar = fixGrammar (map (uncurry production) rules)
 
     conn <- openConn
     MIDI.start conn
@@ -245,13 +281,20 @@ main = do
 
             clearScreen
             setCursorPosition 0 0
-            mapM_ (putStrLn . showBar) thisbar
+            mapM_ (putStrLn . showBar . map fst) thisbar
 
-            let ens = zipWith (\ins row -> zipWith ins [beat0..] row) instruments thisbar
+            let ens = map (\row -> zipWith ($) (map snd row) [beat0..]) thisbar 
             playSimple conn delay . transpose $ ens
             gotime (beat0 + barsize) nextform
     
-    form0 <- forM instruments $ \_ -> Rand.evalRandIO $ concat.concat <$> repeatM (genForm softlyBarForm (genRow barsize grammar))
+    form0 :: [[(Int, Int -> Note)]] <- forM instruments $ \instrCloud -> Rand.evalRandIO $ do
+        let mkrow :: Cloud [(Int, Int -> Note)] = do
+                instr <- instrCloud
+                map (\str -> (str, \beatno -> instr beatno str)) <$> genRow barsize grammar
+        let guide (((a,b):xs):xss) = ((5, const (Note 1 48 127)):xs):xss
+        let silences = repeat id
+        -- silences <- forkCloud $ sequenceA (repeat (Rand.weighted [(id, 50), (const (replicate barsize (0, const (Note 1 0 0))), 50)])) :: Cloud [[(Int, Int -> Note)] -> [(Int, Int -> Note)]]
+        concat.zipWith ($) silences.concat.map guide <$> sequenceA (genForm ["A","A","A","A"] mkrow : repeat (genForm songForMyFatherBarForm mkrow))
     gotime 0 form0
 
     
