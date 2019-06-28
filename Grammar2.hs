@@ -6,9 +6,13 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (filterM, forM, guard, forM_, void, replicateM, when)
 import qualified Control.Monad.Random as Rand
 import Data.Function (on)
-import Data.List (nubBy)
+import Data.List (nubBy, nub)
+import Data.IORef
 import qualified Data.Map as Map
+import System.Environment (getArgs)
 import qualified System.MIDI as MIDI
+import qualified System.Process as Process
+import qualified Text.Parsec as P
 
 -- Rhythmic grammars:
 --
@@ -46,11 +50,62 @@ scale r (Phrase len evs) = Phrase (len * r) (map (first (*r)) evs)
 data Sym = Sym String Int
          | Terminal Int
     deriving (Show)
+
+symLen :: Sym -> Int
+symLen (Sym _ x) = x
+symLen (Terminal _) = 1
          
 data Production = Production Int [Sym]
     deriving (Show)
 
 type Grammar = [Production]
+
+
+type Parser = P.Parsec String ()
+
+tok :: Parser a -> Parser a
+tok p = p <* P.many (P.char ' ')
+
+unique :: (Eq a) => [a] -> Bool
+unique xs = nub xs == xs
+
+parseProd :: Parser Production
+parseProd = do
+    len <- parseNat
+    void $ tok (P.string "=")
+    syms <- P.many parseSym
+    when (len /= sum (map symLen syms)) $
+        fail "Invalid production: lengths do not add up"
+    when (not . unique . map fst $ nub [ (lab, symlen) | Sym lab symlen <- syms ]) $
+        fail "Invalid production: symbol has multiple lengths"
+    void P.newline
+    pure $ Production len syms
+    where
+    parseSym = tok $ P.choice
+        [ Sym <$> parseLabel <*> parseNat
+        , Terminal <$> parseVel
+        ]
+
+    parseLabel :: Parser String
+    parseLabel = (:[]) <$> P.letter
+
+    parseVel :: Parser Int
+    parseVel = P.choice
+        [ 0 <$ P.char '.'
+        , 1 <$ P.char '-'
+        , 2 <$ P.char '+'
+        , 3 <$ P.char '*'
+        , 4 <$ P.char '#'
+        ]
+
+parseNat :: Parser Int
+parseNat = read <$> tok (P.many1 P.digit)
+
+parseGrammar :: Parser (Int, Grammar)
+parseGrammar = do
+    phrase <- tok (P.string "phrase ") *> tok parseNat <* P.newline
+    prods <- P.many parseProd
+    pure (phrase, prods)
 
 type Cloud = Rand.Rand Rand.StdGen
 
@@ -66,16 +121,6 @@ genRhythms prods time = do
         renderSym (Terminal s) = Phrase 1 [(0, s)]
     pure $ foldMap renderSym syms
 
-grammar :: Grammar
-grammar = 
-    [ Production 16 [Sym "A" 8, Sym "A" 8]
-    , Production 8 [Sym "A" 4, Sym "B" 4]
-    , Production 8 [Sym "A" 3, Sym "A" 3, Sym "B" 2]
-    , Production 4 [Sym "A" 2, Sym "A" 2]
-    , Production 3 [Terminal 2, Terminal 0, Terminal 1]
-    , Production 2 [Terminal 1, Terminal 0]
-    ]
-
 
 type Instrument = Int -> Note
 
@@ -87,23 +132,40 @@ instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit
         pure $ \i -> Note 1 (cycle chosen !! i) (if i == 0 then 0 else min 127 (i * 15 + 30))
 
 
+watchConfig :: FilePath -> IORef (Int, [Phrase Int]) -> IO ()
+watchConfig config ref = do
+    contents <- readFile config
+    case P.parse parseGrammar config contents of
+        Left err -> print err
+        Right (len, grammar) -> do
+            let phrases = genRhythms grammar len
+            putStrLn $ "possible phrases: " ++ show (length phrases)
+            writeIORef ref (len, phrases)
+    Process.callProcess "/usr/local/bin/fswatch" ["fswatch", "-1", config]
+    watchConfig config ref
+
 main :: IO ()
 main = do
-    let phraseLen = 16
+    [config] <- getArgs
+    phrasesRef <- newIORef (16, [])
+
+    void . forkIO $ watchConfig config phrasesRef
+
     let tempo = 90
     let phraseScale = 60/(4*tempo)
 
     conn <- openConn
     MIDI.start conn
-    let phrases = map (scale phraseScale) $ genRhythms grammar (round phraseLen)
-    instrs <- Rand.evalRandIO (sequenceA instruments)
 
     let go = do
+            (phraseLen, phrases) <- readIORef phrasesRef
+            instrs <- Rand.evalRandIO (sequenceA instruments)
             now <- getCurrentTime conn
             forM_ instrs $ \instr -> void . forkIO $ do
-                phrase <- Rand.evalRandIO (Rand.uniform phrases)
-                playPhrase conn (fmap instr (shift now phrase))
-            waitUntil conn (now + phraseScale * phraseLen)
+                phraseMay <- (fmap.fmap) (scale phraseScale) $ Rand.evalRandIO (Rand.uniformMay phrases)
+                forM_ phraseMay $ \phrase -> 
+                    playPhrase conn (fmap instr (shift now phrase))
+            waitUntil conn (now + phraseScale * fromIntegral phraseLen)
             go
     go
 
