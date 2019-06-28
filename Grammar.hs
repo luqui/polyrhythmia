@@ -292,8 +292,8 @@ main = do
                 instr <- instrCloud
                 map (\str -> (str, \beatno -> instr beatno str)) <$> genRow barsize grammar
         let guide (((a,b):xs):xss) = ((5, const (Note 1 48 127)):xs):xss
-        let silences = repeat id
-        -- silences <- forkCloud $ sequenceA (repeat (Rand.weighted [(id, 50), (const (replicate barsize (0, const (Note 1 0 0))), 50)])) :: Cloud [[(Int, Int -> Note)] -> [(Int, Int -> Note)]]
+        --let silences = repeat id
+        silences <- forkCloud $ sequenceA (repeat (Rand.weighted [(id, 50), (const (replicate barsize (0, const (Note 1 0 0))), 50)])) :: Cloud [[(Int, Int -> Note)] -> [(Int, Int -> Note)]]
         concat.zipWith ($) silences.concat.map guide <$> sequenceA (genForm ["A","A","A","A"] mkrow : repeat (genForm songForMyFatherBarForm mkrow))
     gotime 0 form0
 
