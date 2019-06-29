@@ -125,15 +125,16 @@ shuffle xs = do
     n <- Rand.getRandomR (0, length xs - 1)
     ((xs !! n) :) <$> shuffle (take n xs <> drop (n+1) xs)
 
-genRhythms :: Grammar -> Int -> Logic.LogicT Cloud (Phrase Int)
-genRhythms prods time = do
+genRhythms :: Int -> Grammar -> Int -> Logic.LogicT Cloud (Phrase Int)
+genRhythms 0 _ _ = empty
+genRhythms depth prods time = do
     candprods <- lift . shuffle $ [ p | p@(Production t _) <- prods, t == time ]
     Production _ syms <- foldr (<|>) empty $ map pure candprods
     let subtime = sum (map symLen syms)
 
     let subgens = nubBy ((==) `on` fst) [ (label,len) | Sym label len <- syms ]
     subpats <- fmap Map.fromList . forM subgens $ \(label,len) -> do
-        (label,) <$> genRhythms prods len
+        (label,) <$> genRhythms (depth-1) prods len
 
     let renderSym (Sym label _) = subpats Map.! label
         renderSym (Terminal s) = Phrase 1 [(0, s)]
@@ -144,7 +145,8 @@ genRhythms prods time = do
 type Instrument = Int -> Note
 
 instruments :: [Cloud Instrument]
-instruments = [ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53] ]
+instruments = [ drumkit [36], drumkit [37], drumkit [38,39], drumkit [40,41], drumkit [42,43,44,45] ]
+    --[ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53] ]
     where
     drumkit notes = do
         chosen <- replicateM 5 (Rand.uniform notes)
@@ -163,7 +165,8 @@ watchConfig config ref = do
     case P.parse parseGrammar config contents of
         Left err -> print err
         Right (tempo, len, grammar) -> do
-            let phrases = genRhythms grammar len
+            let phrases = genRhythms 10 grammar len
+            putStrLn "Reloaded"
             writeIORef ref (Config tempo len phrases)
     void $ Process.withCreateProcess 
              (Process.proc "/usr/local/bin/fswatch" ["fswatch", "-1", config]) $ \_ _ _ p -> 
