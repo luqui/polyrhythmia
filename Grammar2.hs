@@ -61,8 +61,7 @@ symLen :: Sym -> Int
 symLen (Sym _ x) = x
 symLen (Terminal _) = 1
          
-data Production = Production Int [Sym]
-    deriving (Show)
+data Production = Production (TrackName -> Bool) Int [Sym]
 
 type Grammar = [Production]
 
@@ -77,6 +76,7 @@ unique xs = nub xs == xs
 
 parseProd :: Parser Production
 parseProd = do
+    filt <- parseFilter
     len <- parseNat
     void $ tok (P.string "=")
     syms <- P.many parseSym
@@ -85,12 +85,18 @@ parseProd = do
     when (not . unique . map fst $ nub [ (lab, symlen) | Sym lab symlen <- syms ]) $
         fail "Invalid production: symbol has multiple lengths"
     void P.newline
-    pure $ Production len syms
+    pure $ Production filt len syms
     where
+    parseFilter = P.option (const True) $ 
+        tok (P.string "[") *> ((\ts x -> any (x==) ts) <$> P.many parseTrack) <* tok (P.string "]")
+
     parseSym = tok $ P.choice
         [ Sym <$> parseLabel <*> parseNat
         , Terminal <$> parseVel
         ]
+
+    parseTrack :: Parser String
+    parseTrack = tok $ P.many1 P.alphaNum
 
     parseLabel :: Parser String
     parseLabel = (:[]) <$> P.letter
@@ -125,47 +131,48 @@ shuffle xs = do
     n <- Rand.getRandomR (0, length xs - 1)
     ((xs !! n) :) <$> shuffle (take n xs <> drop (n+1) xs)
 
-genRhythms :: Int -> Grammar -> Int -> Logic.LogicT Cloud (Phrase Int)
-genRhythms 0 _ _ = empty
-genRhythms depth prods time = do
-    candprods <- lift . shuffle $ [ p | p@(Production t _) <- prods, t == time ]
-    Production _ syms <- foldr (<|>) empty $ map pure candprods
+genRhythms :: TrackName -> Int -> Grammar -> Int -> Logic.LogicT Cloud (Phrase Int)
+genRhythms _ 0 _ _ = empty
+genRhythms track depth prods time = do
+    candprods <- lift . shuffle $ [ p | p@(Production filt t _) <- prods, filt track, t == time ]
+    Production _ _ syms <- foldr (<|>) empty $ map pure candprods
     let subtime = sum (map symLen syms)
 
     let subgens = nubBy ((==) `on` fst) [ (label,len) | Sym label len <- syms ]
     subpats <- fmap Map.fromList . forM subgens $ \(label,len) -> do
-        (label,) <$> genRhythms (depth-1) prods len
+        (label,) <$> genRhythms track (depth-1) prods len
 
     let renderSym (Sym label _) = subpats Map.! label
         renderSym (Terminal s) = Phrase 1 [(0, s)]
 
     pure $ scale (fromIntegral time / fromIntegral subtime) $ foldMap renderSym syms
 
+type TrackName = String
 
-type Instrument = Int -> Note
+data Instrument = Instrument TrackName (Int -> Note)
 
 instruments :: [Cloud Instrument]
-instruments = [ drumkit [36], drumkit [37], drumkit [38,39], drumkit [40,41], drumkit [42,43,44,45] ]
-    --[ drumkit [36], drumkit [37,38,39,40], drumkit [42,44,46], drumkit [41,43,45,47], drumkit [50, 53] ]
+instruments = --[ drumkit [36], drumkit [37], drumkit [38,39], drumkit [40,41], drumkit [42,43,44,45] ]
+    [ drumkit "kick" [36], drumkit "snare" [37,38,39,40], drumkit "hat" [42,44,46], drumkit "tom" [41,43,45,47], drumkit "ride" [50, 53] ]
     where
-    drumkit notes = do
+    drumkit name notes = do
         chosen <- replicateM 5 (Rand.uniform notes)
-        pure $ \i -> Note 1 (cycle chosen !! i) (if i == 0 then 0 else min 127 (i * 15 + 30))
+        pure $ Instrument name $ \i -> Note 1 (cycle chosen !! i) (if i == 0 then 0 else min 127 (i * 15 + 30))
 
 
 data Config = Config 
     { cfgTempo :: Int
     , cfgPhraseLen :: Int
-    , cfgPhrases :: Logic.LogicT Cloud (Phrase Int)
+    , cfgPhrases :: TrackName -> Logic.LogicT Cloud (Phrase Int)
     }
 
 watchConfig :: FilePath -> IORef Config -> IO ()
 watchConfig config ref = do
     contents <- readFile config
-    case P.parse parseGrammar config contents of
+    case P.parse (parseGrammar <* P.eof) config contents of
         Left err -> print err
         Right (tempo, len, grammar) -> do
-            let phrases = genRhythms 10 grammar len
+            let phrases t = genRhythms t 10 grammar len
             putStrLn "Reloaded"
             writeIORef ref (Config tempo len phrases)
     void $ Process.withCreateProcess 
@@ -179,7 +186,7 @@ main = do
     void $ Sig.installHandler Sig.sigINT (Sig.Catch (throwTo mainThread ExitSuccess)) Nothing
 
     [config] <- getArgs
-    phrasesRef <- newIORef (Config 90 16 (pure mempty))
+    phrasesRef <- newIORef (Config 90 16 (\_ -> pure mempty))
 
     void . forkIO $ watchConfig config phrasesRef
 
@@ -187,17 +194,22 @@ main = do
     conn <- openConn
     MIDI.start conn
 
-    let go = do
+    let go phrcount = do
             cfg <- readIORef phrasesRef
             let phraseScale = 60/(4 * fromIntegral (cfgTempo cfg))
             instrs <- Rand.evalRandIO (sequenceA instruments)
             now <- getCurrentTime conn
-            forM_ instrs $ \instr -> void . forkIO $ do
-                phrase <- Rand.evalRandIO $ Logic.observeT (cfgPhrases cfg)
-                playPhrase conn (fmap instr (shift now (scale phraseScale phrase)))
+            forM_ instrs $ \(Instrument track instr) -> void . forkIO $ do
+                phraseMay <- Rand.evalRandIO $ Logic.observeManyT 1 (cfgPhrases cfg track)
+                forM_ phraseMay $ \phrase -> 
+                    playPhrase conn (fmap instr (shift now (scale phraseScale phrase)))
+            when (phrcount `mod` 4 == 0) . void . forkIO $ do
+               MIDI.send conn (MIDI.MidiMessage 1 (MIDI.NoteOn 55 100))
+               threadDelay 100000
+               MIDI.send conn (MIDI.MidiMessage 1 (MIDI.NoteOn 55 0))
             waitUntil conn (now + phraseScale * fromIntegral (cfgPhraseLen cfg))
-            go
-    go
+            go (phrcount+1)
+    go (0 :: Int)
 
 
 data Note = Note Int Int Int -- ch note vel
