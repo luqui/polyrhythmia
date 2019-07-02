@@ -186,7 +186,7 @@ data Instrument = Instrument TrackName (Int -> Note)
 
 instruments :: [Cloud Instrument]
 instruments = --[ drumkit [36], drumkit [37], drumkit [38,39], drumkit [40,41], drumkit [42,43,44,45] ]
-    [ drumkit "kick" [36], drumkit "snare" [37,38,39,40], drumkit "hat" [42,44,46], drumkit "tom" [41,43,45,47], drumkit "ride" [50, 53] ]
+    [ drumkit "kick" [36], drumkit "snare" [37,38,39,40], drumkit "hat" [42,44,46], drumkit "tom" [41,43,45,47], drumkit "ride" [50, 53], drumkit "crash" [55] ]
     where
     drumkit name notes = do
         chosen <- replicateM 5 (Rand.uniform notes)
@@ -238,6 +238,7 @@ main = do
 
 
 data Note = Note Int Int Int -- ch note vel
+    deriving (Show)
 
 playPhrase :: MIDI.Connection -> Time -> Phrase Note -> IO ()
 playPhrase _ _ (Phrase _ []) = pure ()
