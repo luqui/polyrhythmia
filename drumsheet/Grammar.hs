@@ -15,6 +15,7 @@ import Data.List (nub, sortBy)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map as Map
 import Data.Ord (comparing)
+import Data.Ratio ((%))
 import System.Environment (getArgs)
 import System.Exit (ExitCode(ExitSuccess))
 import qualified System.MIDI as MIDI
@@ -57,6 +58,8 @@ scale r (Phrase len evs) = Phrase (len * r) (map (first (*r)) evs)
 
 data Sym = Sym String String
          | Terminal Int
+         | Group [Sym]
+         | Rescale Sym Rational
     deriving (Show)
          
 data Production = Production 
@@ -77,7 +80,7 @@ emptyGrammar = Grammar 400 []
 type Parser = P.Parsec String ()
 
 tok :: Parser a -> Parser a
-tok p = p <* (comment <|> void (P.many (P.char ' ')))
+tok p = P.try p <* (comment <|> void (P.many (P.char ' ')))
 
 unique :: (Eq a) => [a] -> Bool
 unique xs = nub xs == xs
@@ -105,6 +108,9 @@ parseProd = do
     parseSym = tok $ P.choice
         [ Sym <$> parseName <* P.char ':' <*> parseLabel
         , Terminal <$> parseVel
+        , Group <$ tok (P.char '(') <*> P.many parseSym <* tok (P.char ')')
+        , (\a b s -> Rescale s (fromIntegral a % fromIntegral b))
+            <$ tok (P.char '[') <*> parseNum <* tok (P.char '/') <*> parseNum <* tok (P.char ']') <*> parseSym
         ]
 
     parseName = (:[]) <$> P.oneOf ['A'..'Z']
@@ -122,7 +128,7 @@ parseProd = do
     parseLabel = tok (P.many1 P.alphaNum)
 
 comment :: Parser ()
-comment = void $ P.string "//" *> P.many (P.satisfy (/= '\n'))
+comment = void $ tok (P.string "//") *> P.many (P.satisfy (/= '\n'))
 
 parseNum :: Parser Int
 parseNum = product <$> P.sepBy literal (tok (P.string "*"))
@@ -150,16 +156,19 @@ renderProduction :: (String -> Logic.LogicT Cloud Production) -> String -> Int -
 renderProduction _ _ 0 = empty
 renderProduction chooseProd prodname depth = (`State.evalStateT` Map.empty) $ do
     prod <- lift $ chooseProd prodname
-    fmap mconcat . forM (prodSyms prod) $ \case
-        Terminal v -> pure $ Phrase 1 [(0,v)]
-        Sym name label -> do
-            pad <- State.get
-            case Map.lookup name pad of
-                Nothing -> do
-                    rendered <- lift $ renderProduction chooseProd label (depth-1)
-                    State.put (Map.insert name rendered pad)
-                    pure rendered
-                Just rendered -> pure rendered
+    fmap mconcat (traverse renderSym (prodSyms prod))
+    where
+    renderSym (Terminal v) = pure $ Phrase 1 [(0,v)]
+    renderSym (Sym name label) = do
+        pad <- State.get
+        case Map.lookup name pad of
+            Nothing -> do
+                rendered <- lift $ renderProduction chooseProd label (depth-1)
+                State.put (Map.insert name rendered pad)
+                pure rendered
+            Just rendered -> pure rendered
+    renderSym (Group sym) = fmap mconcat (traverse renderSym sym)
+    renderSym (Rescale sym a) = fmap (scale (recip a)) $ renderSym sym
                     
 renderGrammar :: Grammar -> Instrument -> Logic.LogicT Cloud (Phrase Note)
 renderGrammar grammar (Instrument trackname rendervel) = do
