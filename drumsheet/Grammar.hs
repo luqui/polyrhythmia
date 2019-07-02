@@ -60,7 +60,6 @@ data Production = Production
     { prodFilter :: TrackName -> Bool
     , prodLabel  :: String
     , prodSyms   :: [Sym]
-    , prodInit   :: Bool
     }
 
 data Grammar = Grammar
@@ -83,7 +82,6 @@ unique xs = nub xs == xs
 parseProd :: Parser Production
 parseProd = do
     filt <- parseFilter
-    initSym <- P.option False (True <$ tok (P.string "init "))
     label <- parseLabel
     void $ tok (P.string "=")
     syms <- P.many1 parseSym
@@ -93,7 +91,6 @@ parseProd = do
         { prodFilter = filt
         , prodLabel = label
         , prodSyms = syms
-        , prodInit = initSym
         }
     where
     parseFilter = P.option (const True) $ 
@@ -163,18 +160,12 @@ renderProduction chooseProd prodname depth = (`State.evalStateT` Map.empty) $ do
                     
 renderGrammar :: Grammar -> Instrument -> Logic.LogicT Cloud (Phrase Note)
 renderGrammar grammar (Instrument trackname rendervel) = do
-    initSym <- initSyms
-    fmap rendervel <$> renderProduction chooseProd initSym 10
+    fmap rendervel <$> renderProduction chooseProd "init" 10
     where
     chooseProd :: String -> Logic.LogicT Cloud Production
     chooseProd label = do
         prods <- lift . shuffle $ [ prod | prod <- gProductions grammar, prodLabel prod == label, prodFilter prod trackname ]
         asum (map pure prods)
-
-    initSyms :: Logic.LogicT Cloud String
-    initSyms = do
-        syms <- lift . shuffle $ [ prodLabel prod | prod <- gProductions grammar, prodInit prod, prodFilter prod trackname ]
-        asum (map pure syms)
 
 
 type TrackName = String

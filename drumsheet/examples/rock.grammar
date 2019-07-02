@@ -1,9 +1,9 @@
 tempo 4*90
-init 64 = A:16 A:16 B:16 B:16
-init 64 = A:16 B:16 A:16 B:16
-init 64 = A:16 A:16 A:16 A:16
-init 64 = A:16 A:16 A:16 B:16
-16 = A:8 A:8
+init = A:bar A:bar B:bar B:bar
+init = A:bar B:bar A:bar B:bar
+init = A:bar A:bar A:bar A:bar
+init = A:bar A:bar A:bar B:bar
+bar = A:8 A:8
 [kick] 8 = +.......
 [kick] 8 = +......-
 [kick] 8 = .+......
