@@ -1,18 +1,20 @@
 {-# OPTIONS -Wall #-}
-{-# LANGUAGE DeriveFunctor, TupleSections #-}
+{-# LANGUAGE DeriveFunctor, TupleSections, ViewPatterns, LambdaCase #-}
 
 import Control.Applicative
 import Control.Arrow (first)
 import Control.Concurrent (forkIO, threadDelay, myThreadId)
 import Control.Exception (throwTo)
 import Control.Monad (filterM, forM, forM_, void, replicateM, when)
-import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.Logic as Logic
 import qualified Control.Monad.Random as Rand
-import Data.Function (on)
-import Data.List (nubBy, nub)
-import Data.IORef
+import Control.Monad.Trans.Class (lift)
+import qualified Control.Monad.Trans.State as State
+import Data.Foldable (asum)
+import Data.List (nub, sortBy)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map as Map
+import Data.Ord (comparing)
 import System.Environment (getArgs)
 import System.Exit (ExitCode(ExitSuccess))
 import qualified System.MIDI as MIDI
@@ -47,29 +49,33 @@ instance Semigroup (Phrase a) where
 instance Monoid (Phrase a) where
     mempty = Phrase 0 []
 
-shift :: Time -> Phrase a -> Phrase a
-shift t (Phrase len evs) = Phrase len (map (first (+t)) evs)
-
 scale :: Rational -> Phrase a -> Phrase a
 scale r (Phrase len evs) = Phrase (len * r) (map (first (*r)) evs)
 
-data Sym = Sym String Int
+data Sym = Sym String String
          | Terminal Int
     deriving (Show)
-
-symLen :: Sym -> Int
-symLen (Sym _ x) = x
-symLen (Terminal _) = 1
          
-data Production = Production (TrackName -> Bool) Int [Sym]
+data Production = Production 
+    { prodFilter :: TrackName -> Bool
+    , prodLabel  :: String
+    , prodSyms   :: [Sym]
+    , prodInit   :: Bool
+    }
 
-type Grammar = [Production]
+data Grammar = Grammar
+    { gTempo       :: Int   -- allows "4*90",  quarternote 90bpm
+    , gProductions :: [Production]
+    } 
+
+emptyGrammar :: Grammar
+emptyGrammar = Grammar 400 []
 
 
 type Parser = P.Parsec String ()
 
 tok :: Parser a -> Parser a
-tok p = p <* P.many (P.char ' ')
+tok p = p <* (comment <|> void (P.many (P.char ' ')))
 
 unique :: (Eq a) => [a] -> Bool
 unique xs = nub xs == xs
@@ -77,29 +83,31 @@ unique xs = nub xs == xs
 parseProd :: Parser Production
 parseProd = do
     filt <- parseFilter
-    len <- parseNat
+    initSym <- P.option False (True <$ tok (P.string "init "))
+    label <- parseLabel
     void $ tok (P.string "=")
-    syms <- P.many parseSym
-    --when (len /= sum (map symLen syms)) $
-    --    fail "Invalid production: lengths do not add up"
-    when (not . unique . map fst $ nub [ (lab, symlen) | Sym lab symlen <- syms ]) $
+    syms <- P.many1 parseSym
+    when (not . unique . map fst $ nub [ (name, lab) | Sym name lab <- syms ]) $
         fail "Invalid production: symbol has multiple lengths"
-    void P.newline
-    pure $ Production filt len syms
+    pure $ Production 
+        { prodFilter = filt
+        , prodLabel = label
+        , prodSyms = syms
+        , prodInit = initSym
+        }
     where
     parseFilter = P.option (const True) $ 
-        tok (P.string "[") *> ((\ts x -> any (x==) ts) <$> P.many parseTrack) <* tok (P.string "]")
+        tok (P.string "[") *> ((\ts x -> any (x==) ts) <$> P.many parseTrackName) <* tok (P.string "]")
+    
+    parseTrackName :: Parser TrackName
+    parseTrackName = tok $ P.many1 P.alphaNum
 
     parseSym = tok $ P.choice
-        [ Sym <$> parseLabel <*> parseNat
+        [ Sym <$> parseName <* P.char ':' <*> parseLabel
         , Terminal <$> parseVel
         ]
 
-    parseTrack :: Parser String
-    parseTrack = tok $ P.many1 P.alphaNum
-
-    parseLabel :: Parser String
-    parseLabel = (:[]) <$> P.letter
+    parseName = (:[]) <$> P.oneOf ['A'..'Z']
 
     parseVel :: Parser Int
     parseVel = P.choice
@@ -110,18 +118,25 @@ parseProd = do
         , 4 <$ P.char '#'
         ]
 
+    parseLabel :: Parser String
+    parseLabel = tok (P.many1 P.alphaNum)
+
 comment :: Parser ()
-comment = void $ P.string "--" *> P.many (P.satisfy (/= '\n')) *> P.newline
+comment = void $ P.string "//" *> P.many (P.satisfy (/= '\n'))
 
-parseNat :: Parser Int
-parseNat = read <$> tok (P.many1 P.digit)
+parseNum :: Parser Int
+parseNum = product <$> P.sepBy literal (tok (P.string "*"))
+    where
+    literal = read <$> tok (P.many1 P.digit)
 
-parseGrammar :: Parser (Int, Int, Grammar)
+parseGrammar :: Parser Grammar
 parseGrammar = do
-    tempo <- tok (P.string "tempo ") *> tok parseNat <* P.newline
-    phrase <- tok (P.string "phrase ") *> tok parseNat <* P.newline
-    prods <- concat <$> P.many (([] <$ comment) <|> ((:[]) <$> parseProd))
-    pure (tempo, phrase, prods)
+    tempo <- tok (P.string "tempo ") *> tok parseNum <* P.newline
+    prods <- concat <$> P.many (((:[]) <$> parseProd  <|>  [] <$ tok (pure ())) <* P.newline)
+    pure $ Grammar { gTempo = tempo, gProductions = prods }
+
+
+
 
 type Cloud = Rand.Rand Rand.StdGen
 
@@ -131,21 +146,36 @@ shuffle xs = do
     n <- Rand.getRandomR (0, length xs - 1)
     ((xs !! n) :) <$> shuffle (take n xs <> drop (n+1) xs)
 
-genRhythms :: TrackName -> Int -> Grammar -> Int -> Logic.LogicT Cloud (Phrase Int)
-genRhythms _ 0 _ _ = empty
-genRhythms track depth prods time = do
-    candprods <- lift . shuffle $ [ p | p@(Production filt t _) <- prods, filt track, t == time ]
-    Production _ _ syms <- foldr (<|>) empty $ map pure candprods
-    let subtime = sum (map symLen syms)
+renderProduction :: (String -> Logic.LogicT Cloud Production) -> String -> Int -> Logic.LogicT Cloud (Phrase Int)
+renderProduction _ _ 0 = empty
+renderProduction chooseProd prodname depth = (`State.evalStateT` Map.empty) $ do
+    prod <- lift $ chooseProd prodname
+    fmap mconcat . forM (prodSyms prod) $ \case
+        Terminal v -> pure $ Phrase 1 [(0,v)]
+        Sym name label -> do
+            pad <- State.get
+            case Map.lookup name pad of
+                Nothing -> do
+                    rendered <- lift $ renderProduction chooseProd label (depth-1)
+                    State.put (Map.insert name rendered pad)
+                    pure rendered
+                Just rendered -> pure rendered
+                    
+renderGrammar :: Grammar -> Instrument -> Logic.LogicT Cloud (Phrase Note)
+renderGrammar grammar (Instrument trackname rendervel) = do
+    initSym <- initSyms
+    fmap rendervel <$> renderProduction chooseProd initSym 10
+    where
+    chooseProd :: String -> Logic.LogicT Cloud Production
+    chooseProd label = do
+        prods <- lift . shuffle $ [ prod | prod <- gProductions grammar, prodLabel prod == label, prodFilter prod trackname ]
+        asum (map pure prods)
 
-    let subgens = nubBy ((==) `on` fst) [ (label,len) | Sym label len <- syms ]
-    subpats <- fmap Map.fromList . forM subgens $ \(label,len) -> do
-        (label,) <$> genRhythms track (depth-1) prods len
+    initSyms :: Logic.LogicT Cloud String
+    initSyms = do
+        syms <- lift . shuffle $ [ prodLabel prod | prod <- gProductions grammar, prodInit prod, prodFilter prod trackname ]
+        asum (map pure syms)
 
-    let renderSym (Sym label _) = subpats Map.! label
-        renderSym (Terminal s) = Phrase 1 [(0, s)]
-
-    pure $ scale (fromIntegral time / fromIntegral subtime) $ foldMap renderSym syms
 
 type TrackName = String
 
@@ -160,21 +190,14 @@ instruments = --[ drumkit [36], drumkit [37], drumkit [38,39], drumkit [40,41], 
         pure $ Instrument name $ \i -> Note 1 (cycle chosen !! i) (if i == 0 then 0 else min 127 (i * 15 + 30))
 
 
-data Config = Config 
-    { cfgTempo :: Int
-    , cfgPhraseLen :: Int
-    , cfgPhrases :: TrackName -> Logic.LogicT Cloud (Phrase Int)
-    }
-
-watchConfig :: FilePath -> IORef Config -> IO ()
+watchConfig :: FilePath -> IORef Grammar -> IO ()
 watchConfig config ref = do
     contents <- readFile config
     case P.parse (parseGrammar <* P.eof) config contents of
         Left err -> print err
-        Right (tempo, len, grammar) -> do
-            let phrases t = genRhythms t 10 grammar len
+        Right grammar -> do
             putStrLn "Reloaded"
-            writeIORef ref (Config tempo len phrases)
+            writeIORef ref grammar
     void $ Process.withCreateProcess 
              (Process.proc "/usr/local/bin/fswatch" ["fswatch", "-1", config]) $ \_ _ _ p -> 
                 Process.waitForProcess p
@@ -186,42 +209,37 @@ main = do
     void $ Sig.installHandler Sig.sigINT (Sig.Catch (throwTo mainThread ExitSuccess)) Nothing
 
     [config] <- getArgs
-    phrasesRef <- newIORef (Config 90 16 (\_ -> pure mempty))
+    grammarRef <- newIORef emptyGrammar
 
-    void . forkIO $ watchConfig config phrasesRef
+    void . forkIO $ watchConfig config grammarRef
 
 
     conn <- openConn
     MIDI.start conn
 
     let go phrcount = do
-            cfg <- readIORef phrasesRef
-            let phraseScale = 60/(4 * fromIntegral (cfgTempo cfg))
+            grammar <- readIORef grammarRef
+            let phraseScale = 60 / fromIntegral (gTempo grammar)
             instrs <- Rand.evalRandIO (sequenceA instruments)
             now <- getCurrentTime conn
-            forM_ instrs $ \(Instrument track instr) -> void . forkIO $ do
-                phraseMay <- Rand.evalRandIO $ Logic.observeManyT 1 (cfgPhrases cfg track)
+            forM_ instrs $ \instr -> void . forkIO $ do
+                phraseMay <- Rand.evalRandIO $ Logic.observeManyT 1 (renderGrammar grammar instr)
                 forM_ phraseMay $ \phrase -> 
-                    playPhrase conn (fmap instr (shift now (scale phraseScale phrase)))
-            when (phrcount `mod` 4 == 0) . void . forkIO $ do
-               MIDI.send conn (MIDI.MidiMessage 1 (MIDI.NoteOn 55 100))
-               threadDelay 100000
-               MIDI.send conn (MIDI.MidiMessage 1 (MIDI.NoteOn 55 0))
-            waitUntil conn (now + phraseScale * fromIntegral (cfgPhraseLen cfg))
+                    playPhrase conn now (scale phraseScale phrase)
+            waitUntil conn (now + phraseScale * fromIntegral 64) -- XXX hackkkk
             go (phrcount+1)
     go (0 :: Int)
 
 
 data Note = Note Int Int Int -- ch note vel
 
-playPhrase :: MIDI.Connection -> Phrase Note -> IO ()
-playPhrase _ (Phrase _ []) = pure ()
-playPhrase conn (Phrase len evs) = do
-    let t0 = fst (head evs)
-    forM_ (zip evs (map fst (tail evs) ++ [t0+len])) $ \((t,Note ch note vel),t') -> do
-        waitUntil conn t
+playPhrase :: MIDI.Connection -> Time -> Phrase Note -> IO ()
+playPhrase _ _ (Phrase _ []) = pure ()
+playPhrase conn offset (Phrase len (sortBy (comparing fst) -> evs)) = do
+    forM_ (zip evs (map fst (tail evs) ++ [offset+len])) $ \((t,Note ch note vel),t') -> do
+        waitUntil conn (t + offset)
         MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note vel))
-        waitUntil conn t'
+        waitUntil conn (t' + offset)
         MIDI.send conn (MIDI.MidiMessage ch (MIDI.NoteOn note 0))
 
 getCurrentTime :: MIDI.Connection -> IO Time
