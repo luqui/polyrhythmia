@@ -43,6 +43,9 @@ type Time = Rational
 data Phrase a = Phrase Time [(Time, a)]
     deriving (Functor, Show)
 
+phraseLen :: Phrase a -> Time
+phraseLen (Phrase l _) = l
+
 instance Semigroup (Phrase a) where
     Phrase t es <> Phrase t' es' = Phrase (t+t') (es <> map (first (+t)) es')
 
@@ -208,18 +211,21 @@ main = do
     conn <- openConn
     MIDI.start conn
 
-    let go phrcount = do
+    let go = do
             grammar <- readIORef grammarRef
             let phraseScale = 60 / fromIntegral (gTempo grammar)
             instrs <- Rand.evalRandIO (sequenceA instruments)
             now <- getCurrentTime conn
-            forM_ instrs $ \instr -> void . forkIO $ do
+            lens <- forM instrs $ \instr -> do
                 phraseMay <- Rand.evalRandIO $ Logic.observeManyT 1 (renderGrammar grammar instr)
-                forM_ phraseMay $ \phrase -> 
-                    playPhrase conn now (scale phraseScale phrase)
-            waitUntil conn (now + phraseScale * fromIntegral 64) -- XXX hackkkk
-            go (phrcount+1)
-    go (0 :: Int)
+                case phraseMay of
+                    [] -> pure 0
+                    phrase:_ -> do
+                        void . forkIO . playPhrase conn now $ scale phraseScale phrase
+                        pure (phraseLen phrase)
+            waitUntil conn (now + phraseScale * max (maximum lens) 0.1)
+            go 
+    go
 
 
 data Note = Note Int Int Int -- ch note vel
