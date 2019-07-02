@@ -1,0 +1,19 @@
+tempo 3*130
+init = A:bar
+[ride] bar = A:ridepair A:ridepair
+ridepair = A:ridebeat B:ridebeat 
+ridepair = A:ridebeat B:ridebeat 
+ridepair = A:ridebeat B:ridebeat 
+ridepair = +.- .-.
+ridepair = .-. -.-
+ridebeat = +..
+ridebeat = +.-
+[hat] bar = ... -.. ... -..
+[snare tom kick] bar = A:beat B:beat C:beat D:beat
+beat = ...
+beat = ...
+beat = ...
+beat = ...
+beat = [2/1](...--)
+beat = ..-
+beat = -..
