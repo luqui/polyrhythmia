@@ -1,28 +1,23 @@
 tempo 3*130
-init = A:firstbar B:bar C:bar D:bar E:bar F:bar G:bar H:bar I:bar J:bar K:bar L:bar
+init = A:firstbar B:bar B:bar B:bar C:bar C:bar C:bar C:bar D:bar D:bar D:bar D:bar E:bar E:bar E:bar E:bar
+init = E:firstbar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar
+init = A:firstbar B:bar C:bar D:bar E:bar F:bar G:bar H:bar I:bar J:bar K:bar L:bar M:bar N:bar O:bar P:bar
 [crash] firstbar = #.. +.. +.. +.-
 [crash] bar = ... ... ... ...
 [snare kick hat tom ride] firstbar = A:bar
 [ride] bar = A:ridepair A:ridepair
-ridepair = A:ridebeat B:ridebeat 
-ridepair = A:ridebeat B:ridebeat 
-ridepair = A:ridebeat B:ridebeat 
+(3) ridepair = A:ridebeat B:ridebeat 
 ridepair = +.- .-.
 ridepair = .-. -.-
 ridebeat = +..
 ridebeat = +.-
 [hat] bar = ... -.. ... -..
-[snare tom kick] bar = A:beat B:beat C:beat D:beat
-[snare tom kick] bar = A:beat B:beat C:beat D:beat
-[snare tom kick] bar = A:beat B:beat C:beat D:beat
+[snare tom kick] (3) bar = A:beat B:beat C:beat D:beat
 [snare tom kick] bar = [4/3](A:4half A:4half)
-beat = ...
-beat = ...
-beat = ...
-beat = ...
+(4) beat = ...
 beat = [2/1](...--)
 beat = ..-
-beat = -..
+beat = +..
 
 [kick] 4half = +... ...+
 [kick] 4half = .-+. ...+

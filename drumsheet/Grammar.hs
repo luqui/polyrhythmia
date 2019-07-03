@@ -23,22 +23,6 @@ import qualified System.Posix.Signals as Sig
 import qualified System.Process as Process
 import qualified Text.Parsec as P
 
--- Rhythmic grammars:
---
--- A production maps a certain length to a sequence of smaller
--- lengths, possibly with repetition. E.g.
---
--- 4 = A(2) A(2)
---
--- This rule says that when we encounter a phrase of length 4,
--- we may rewrite it by generating a phrase of length 2 and
--- repeating it twice.
---
--- There are also "terminal" phrases, which are simply velocities
--- (strengths).
---
--- 3 = [2] [0] [1]   -- basic swing
-
 type Time = Rational
 
 data Phrase a = Phrase Time [(Time, a)]
@@ -66,6 +50,7 @@ data Production = Production
     { prodFilter :: TrackName -> Bool
     , prodLabel  :: String
     , prodSyms   :: [Sym]
+    , prodWeight :: Rational
     }
 
 data Grammar = Grammar
@@ -88,6 +73,7 @@ unique xs = nub xs == xs
 parseProd :: Parser Production
 parseProd = do
     filt <- parseFilter
+    weight <- parseWeight
     label <- parseLabel
     void $ tok (P.string "=")
     syms <- P.many1 parseSym
@@ -97,6 +83,7 @@ parseProd = do
         { prodFilter = filt
         , prodLabel = label
         , prodSyms = syms
+        , prodWeight = weight
         }
     where
     parseFilter = P.option (const True) $ 
@@ -104,6 +91,12 @@ parseProd = do
     
     parseTrackName :: Parser TrackName
     parseTrackName = tok $ P.many1 P.alphaNum
+
+    parseWeight :: Parser Rational
+    parseWeight = do
+        w <- P.option 1 $ tok (P.char '(') *> parseNum <* tok (P.char ')')
+        when (w <= 0) $ fail "weights must be positive"
+        pure $ fromIntegral w
 
     parseSym = tok $ P.choice
         [ Sym <$> parseName <* P.char ':' <*> parseLabel
@@ -146,6 +139,13 @@ parseGrammar = do
 
 type Cloud = Rand.Rand Rand.StdGen
 
+weightedShuffle :: [(a, Rational)] -> Cloud [a]
+weightedShuffle [] = pure []
+weightedShuffle xs = do
+    n <- Rand.weighted (zip [0..] (map snd xs))
+    map fst . ((xs !! n) :) <$> shuffle (take n xs <> drop (n+1) xs)
+
+
 shuffle :: [a] -> Cloud [a]
 shuffle [] = pure []
 shuffle xs = do
@@ -176,7 +176,7 @@ renderGrammar grammar (Instrument trackname rendervel) = do
     where
     chooseProd :: String -> Logic.LogicT Cloud Production
     chooseProd label = do
-        prods <- lift . shuffle $ [ prod | prod <- gProductions grammar, prodLabel prod == label, prodFilter prod trackname ]
+        prods <- lift . weightedShuffle $ [ (prod, prodWeight prod) | prod <- gProductions grammar, prodLabel prod == label, prodFilter prod trackname ]
         asum (map pure prods)
 
 
