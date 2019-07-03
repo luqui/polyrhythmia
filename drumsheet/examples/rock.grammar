@@ -1,10 +1,14 @@
 tempo 4*90
-init = A:phrase
+
+// "Rock" (more like hip hop or jazz-funk honestly)
+
+init = A:phrase A:phrase B:phrase A:phrase
 phrase = A:bar A:bar B:bar B:bar
 phrase = A:bar B:bar A:bar C:fillbar
 phrase = A:bar A:bar A:bar A:bar
 phrase = A:bar A:bar A:bar B:fillbar
 bar = A:8 A:8
+[crash] init = #
 fillbar = A:8 [2/1](A:8 A:8)
 fillbar = [3/2](A:8 B:8 C:8)
 [snare] fillbar = A:8 .... ++++

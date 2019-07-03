@@ -1,0 +1,14 @@
+tempo 4*90
+
+[snare] intro = -.-.-.
+[kick snare hat ride tom] init = A:bar A:bar A:bar A:bar A:bar A:bar A:bar B:fillbar
+[crash] init = #
+bar = +.-.-. --.-.-
+bar = +... .... +...
+bar = ...- +... ....
+bar = +.. -.. -.. -..
+bar = +.. +.- +.. +.-
+fillbar = A:bar
+fillbar = ++. --. ++. ---
+fillbar = .++ .-- .++ +--
+fillbar = +... +.+. +---

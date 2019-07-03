@@ -5,7 +5,7 @@ import Control.Applicative
 import Control.Arrow (first)
 import Control.Concurrent (forkIO, threadDelay, myThreadId)
 import Control.Exception (throwTo)
-import Control.Monad (filterM, forM, forM_, void, replicateM, when)
+import Control.Monad (filterM, forM, forM_, void, replicateM, when, forever, join)
 import qualified Control.Monad.Logic as Logic
 import qualified Control.Monad.Random as Rand
 import Control.Monad.Trans.Class (lift)
@@ -57,10 +57,6 @@ data Grammar = Grammar
     { gTempo       :: Int   -- allows "4*90",  quarternote 90bpm
     , gProductions :: [Production]
     } 
-
-emptyGrammar :: Grammar
-emptyGrammar = Grammar 400 []
-
 
 type Parser = P.Parsec String ()
 
@@ -170,9 +166,9 @@ renderProduction chooseProd prodname depth = (`State.evalStateT` Map.empty) $ do
     renderSym (Group sym) = fmap mconcat (traverse renderSym sym)
     renderSym (Rescale sym a) = fmap (scale (recip a)) $ renderSym sym
                     
-renderGrammar :: Grammar -> Instrument -> Logic.LogicT Cloud (Phrase Note)
-renderGrammar grammar (Instrument trackname rendervel) = do
-    fmap rendervel <$> renderProduction chooseProd "init" 10
+renderGrammar :: String -> Grammar -> Instrument -> Logic.LogicT Cloud (Phrase Note)
+renderGrammar startsym grammar (Instrument trackname rendervel) = do
+    fmap rendervel <$> renderProduction chooseProd startsym 10
     where
     chooseProd :: String -> Logic.LogicT Cloud Production
     chooseProd label = do
@@ -192,15 +188,18 @@ instruments = --[ drumkit [36], drumkit [37], drumkit [38,39], drumkit [40,41], 
         chosen <- replicateM 5 (Rand.uniform notes)
         pure $ Instrument name $ \i -> Note 1 (cycle chosen !! i) (if i == 0 then 0 else min 127 (i * 15 + 30))
 
+loadConfig :: FilePath -> IO (Either P.ParseError Grammar)
+loadConfig config = P.parse (parseGrammar <* P.eof) config <$> readFile config
+
 
 watchConfig :: FilePath -> IORef Grammar -> IO ()
 watchConfig config ref = do
-    contents <- readFile config
-    case P.parse (parseGrammar <* P.eof) config contents of
+    grammar <- loadConfig config
+    case grammar of
         Left err -> print err
-        Right grammar -> do
-            putStrLn "Reloaded"
-            writeIORef ref grammar
+        Right g -> do
+            putStrLn ("Loaded " ++ config)
+            writeIORef ref g
     void $ Process.withCreateProcess 
              (Process.proc "/usr/local/bin/fswatch" ["fswatch", "-1", config]) $ \_ _ _ p -> 
                 Process.waitForProcess p
@@ -212,7 +211,8 @@ main = do
     void $ Sig.installHandler Sig.sigINT (Sig.Catch (throwTo mainThread ExitSuccess)) Nothing
 
     [config] <- getArgs
-    grammarRef <- newIORef emptyGrammar
+    grammar0 <- join $ either (fail.show) pure <$> loadConfig config
+    grammarRef <- newIORef grammar0
 
     void . forkIO $ watchConfig config grammarRef
 
@@ -220,21 +220,21 @@ main = do
     conn <- openConn
     MIDI.start conn
 
-    let go = do
+    let play startsym = do
             grammar <- readIORef grammarRef
             let phraseScale = 60 / fromIntegral (gTempo grammar)
             instrs <- Rand.evalRandIO (sequenceA instruments)
             now <- getCurrentTime conn
             lens <- forM instrs $ \instr -> do
-                phraseMay <- Rand.evalRandIO $ Logic.observeManyT 1 (renderGrammar grammar instr)
+                phraseMay <- Rand.evalRandIO $ Logic.observeManyT 1 (renderGrammar startsym grammar instr)
                 case phraseMay of
                     [] -> pure 0
                     phrase:_ -> do
                         void . forkIO . playPhrase conn now $ scale phraseScale phrase
                         pure (phraseLen phrase)
             waitUntil conn (now + phraseScale * max (maximum lens) 0.1)
-            go 
-    go
+    play "intro"
+    forever (play "init")
 
 
 data Note = Note Int Int Int -- ch note vel

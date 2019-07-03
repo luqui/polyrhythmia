@@ -1,4 +1,5 @@
 tempo 3*130
+[ride] intro = +.. ... +.. ... +.. +.. +.. +.-
 init = A:firstbar B:bar B:bar B:bar C:bar C:bar C:bar C:bar D:bar D:bar D:bar D:bar E:bar E:bar E:bar E:bar
 init = E:firstbar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar
 init = A:firstbar B:bar C:bar D:bar E:bar F:bar G:bar H:bar I:bar J:bar K:bar L:bar M:bar N:bar O:bar P:bar
