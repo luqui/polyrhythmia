@@ -1,0 +1,31 @@
+tempo 4*110
+
+[kick snare hat ride tom] init = A:bar A:bar A:bar A:bar B:bar B:bar A:bar C:bar
+[kick snare hat ride tom] init = A:bar A:bar A:bar A:bar A:bar A:bar A:bar B:bar
+[kick snare hat ride tom] init = A:bar A:bar B:bar B:bar C:bar C:bar D:bar D:bar
+[crash] init = #
+bar = A:8 B:6
+bar = A:4 B:3 C:4 D:3
+bar  = .... +... ... -..
+bar  = +... .... +.+ ...
+8 = A:4 B:4
+8 = A:3 A:3 B:2
+6 = A:3 A:3
+6 = A:2 A:2 A:2
+
+4 = +...
+4 = ..+.
+4 = .-.-
+4 = [3/4]A:3
+4 = ....
+
+3 = +.-
+3 = .-.
+3 = +--
+3 = ...
+3 = [4/3]A:4
+
+2 = +.
+2 = .-
+2 = ..
+2 = [3/2]A:3
