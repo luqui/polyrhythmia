@@ -1,10 +1,10 @@
 tempo 3*130
 [ride] intro = +.. ... +.. ... +.. +.. +.. +.-
-init = A:firstbar B:bar B:bar B:bar C:bar C:bar C:bar C:bar D:bar D:bar D:bar D:bar E:bar E:bar E:bar E:bar
-init = E:firstbar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar
-init = A:firstbar B:bar C:bar D:bar E:bar F:bar G:bar H:bar I:bar J:bar K:bar L:bar M:bar N:bar O:bar P:bar
-[crash] firstbar = #.. +.. +.. +.-
-[crash] bar = ... ... ... ...
+init = A:bar B:bar B:bar B:bar C:bar C:bar C:bar C:bar D:bar D:bar D:bar D:bar E:bar E:bar E:bar E:bar
+init = A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar A:bar B:bar C:bar D:bar
+init = A:bar B:bar C:bar D:bar E:bar F:bar G:bar H:bar I:bar J:bar K:bar L:bar M:bar N:bar O:bar P:bar
+[kick snare hat ride tom] init = .
+[crash] init = #
 [snare kick hat tom ride] firstbar = A:bar
 [ride] bar = A:ridepair A:ridepair
 (3) ridepair = A:ridebeat B:ridebeat 
