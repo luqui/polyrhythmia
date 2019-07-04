@@ -1,0 +1,17 @@
+tempo 62*4
+
+[snare] intro = -.-.-.-. A:bar A:bar
+[kick ride hat] intro = ........ A:bar A:bar
+[kick ride hat snare tom] init = A:bar A:bar A:bar C:fill A:bar A:bar A:bar C:fill B:bar B:bar B:bar D:fill
+[kick ride hat snare tom] init = A:bar A:bar D:8 +....... C:fill A:bar A:bar D:8 +....... C:fill B:bar B:bar B:bar E:fill
+[crash] init = #
+bar = A:8 B:8
+fill = A:bar
+fill = A:8 ++.+ .+.+
+fill = A:8 +--. +---
+fill = [3/2](A:8 A:8 B:8)
+[kick] 8 = +..-+..-
+8 = +..+..-.
+8 = ..+..-..
+8 = ..+..-..
+8 = -.-.-.-.
