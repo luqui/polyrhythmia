@@ -1,15 +1,28 @@
-tempo 62*4
+tempo 70*4
 
 [snare] intro = -.-.-.-. A:bar A:bar
 [kick ride hat] intro = ........ A:bar A:bar
-[kick ride hat snare tom] init = A:bar A:bar A:bar C:fill A:bar A:bar A:bar C:fill B:bar B:bar B:bar D:fill
-[kick ride hat snare tom] init = A:bar A:bar D:8 +....... C:fill A:bar A:bar D:8 +....... C:fill B:bar B:bar B:bar E:fill
+
+// blue bossa
+//[kick ride hat snare tom] init = A:bar A:bar A:bar A:bar A:bar A:bar A:bar B:fill
+//[kick ride hat snare tom] init = A:bar B:bar A:bar B:bar A:bar B:bar A:bar C:fill
+//[kick ride hat snare tom] init = A:bar B:bar C:bar D:bar E:bar F:bar G:bar H:fill
+//[kick ride hat snare tom] init = .
+
+// song for my father
+// [kick ride hat snare tom] init = A:bar A:bar A:bar C:fill A:bar A:bar A:bar C:fill B:bar B:bar B:bar D:fill
+// [kick ride hat snare tom] init = A:bar A:bar D:8 +....... C:fill A:bar A:bar D:8 +....... C:fill B:bar B:bar B:bar E:fill
+
+// wave
+[kick ride hat snare tom] (3) init = A:bar A:bar A:bar A:bar A:bar B:fill A:bar A:bar A:bar A:bar A:bar B:fill C:bar C:bar C:bar D:fill A:bar A:bar A:bar A:bar A:bar E:fill
+[kick ride hat snare tom] init = .
+
 [crash] init = #
 bar = A:8 B:8
 fill = A:bar
 fill = A:8 ++.+ .+.+
 fill = A:8 +--. +---
-fill = [3/2](A:8 A:8 B:8)
+// fill = [3/2](A:8 A:8 B:8)
 [kick] 8 = +..-+..-
 8 = +..+..-.
 8 = ..+..-..
